@@ -1,0 +1,116 @@
+# @package model
+
+_target_: src.models.model_wrapper.CustomModelWrapper
+
+pretrained: null
+resume_from_checkpoint: null
+
+enable_depth: false
+enable_track: false
+enable_normal: false
+enable_3dgs: false
+
+freeze: []
+test_modalities: ["camera_pose", "trajectory"]
+
+net:
+  _target_: src.models.model.CustomModel
+  backbone_args:
+    name: vitg
+    out_layers: [19, 27, 33, 39]
+    alt_start: 13
+    qknorm_start: 13
+    rope_start: 13
+    cat_token: true
+    
+  head_args:
+    dim_in: 3072
+    output_dim: 2
+    features: 256
+    out_channels: [256, 512, 1024, 1024]
+  cam_args:
+    cam_dec:
+      dim_in: 3072
+  st_mod_args:
+    feature_dim: 3072
+    embed_dim: 1024
+    feature_level: 4
+    patch_size: 14
+    detach_pts3d: true
+    detach_feats: false
+    resize_factor: 2
+    dynamic_topk: 0.2
+    weight_dynamic_score: true
+    weight_dynamic_score_detach: true
+    scale_time_embed: true
+    use_time_embed_feat: true
+    motion_dim: 9
+    spatial_temporal_feature_idx: [3, 7, 11, 15]
+    temporal_attn_layer_idx: []
+    mask_attn_layer_idx: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+  offset_head_args:
+    dim_in: 3072
+    patch_size: 14
+    motion_field_num_level: 4
+    motion_dim: 9
+    pred_offset_num_level: 0
+    num_point: 9
+    use_checkpointing: true
+  trajectory_mod_args:
+    num_point: 9
+    patch_size: 14
+    fixed_offset_level: [0, 1, 2, 3]
+    ms_deform_level: []
+    interpolate_dynamic_mask: true
+    use_checkpointing: false #
+  
+
+
+    
+
+train_criterion:
+  _target_: src.losses.loss_container.LossContainer
+  losses:
+    - _target_: src.losses.basic_losses.CameraPoseLoss
+      loss_type: l1
+      gamma: 0.6
+    - _target_: src.losses.basic_losses.Trajectory3DLoss
+      gamma: 1.0
+      alpha: 0.2
+      gradient_loss_fn: normal
+      valid_range: 0.98
+  weights: [5.0, 1.0]
+
+validation_criterion: null
+
+optimizer:
+  betas:
+  - 0.9
+  - 0.95
+  param_groups:
+    pretrained:
+      lr: 3.0e-05
+      weight_decay: 0.05
+    backbone:
+      lr: 3.0e-05
+      weight_decay: 0.05
+    new:
+      lr: 0.0003
+      weight_decay: 0.05
+
+
+scheduler:
+    warmup_epochs: 1
+    max_epochs: ${trainer.max_epochs}
+    eta_min_ratio: 0.1
+    verbose: false
+
+compile: false
+
+visualizer:
+  _target_: src.visualization.Visualizer
+  save_path: ${paths.output_root}/${paths.exp_name}/vis
+  save_nums: -1
+  export_pc: true
+  export_3dgs: false
+  

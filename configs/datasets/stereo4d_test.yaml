@@ -1,0 +1,16 @@
+# @package datasets.stereo4d_test
+
+ROOT: "/data/tmp/stereo4d_debug"
+split: "val"
+resolution: [476, 364]
+aug_crop: 1.0
+normalize_camera_pose: true
+normalize_point_cloud: true
+seed: null # dummy
+patch_size: 14
+
+dataset_info: null
+data_sampling_info: null
+
+transform: null
+

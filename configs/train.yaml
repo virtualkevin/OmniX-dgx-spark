@@ -1,0 +1,25 @@
+# @package _global_
+
+defaults:
+  - _self_
+  - data_module: default      # configs/
+  - datasets: all_datasets  # load all datasets
+  - model: default
+  - trainer: default
+  
+seed: 42
+
+paths:
+  output_root: outputs
+  exp_name: debug
+
+# 统一的 Hydra 配置（使用上面的变量）
+hydra:
+  run:
+    dir: ${paths.output_root}/${paths.exp_name}
+  sweep:
+    dir: ${paths.output_root}/${paths.exp_name}/multirun
+    subdir: ${hydra.job.num}
+  job:
+    chdir: false
+

@@ -1,0 +1,19 @@
+# @package trainer
+
+_target_: lightning.pytorch.trainer.Trainer
+
+default_root_dir: ${paths.output_root}/${paths.exp_name}
+min_epochs: 1
+max_epochs: 20
+accelerator: gpu
+devices: auto
+check_val_every_n_epoch: 20
+deterministic: false
+strategy: ddp
+num_nodes: 1
+sync_batchnorm: true
+use_distributed_sampler: false
+precision: bf16
+enable_model_summary: false
+gradient_clip_val: 1.0
+gradient_clip_algorithm: norm

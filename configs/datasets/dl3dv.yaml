@@ -1,0 +1,53 @@
+# @package datasets.dl3dv
+
+ROOT: "/data/tmp/dl3dv_debug"
+split: "train"
+resolution: [476, 364]
+aug_crop: 1.0
+normalize_camera_pose: true
+normalize_point_cloud: true
+aug_image: true
+seed: null
+patch_size: 14
+
+dataset_info: 
+  num_sample_image_pool: 50
+
+# replace the following params in exp
+data_sampling_info:
+  static_image:
+    min_total_image: 1
+    sampling_ratio: 0.0
+    max_total_image: 24
+  unsynced_dynamic_video:
+    min_total_image: 2
+    sampling_ratio: 0.0
+    max_total_image: 24
+    max_unsynced_video: 3
+  synced_dynamic_video:
+    min_total_image: 4
+    sampling_ratio: 0.0
+    max_total_image: 24
+    min_synced_video: 1
+    max_synced_video: 1
+  hybrid_dynamic_video:
+    min_total_image: 4
+    sampling_ratio: 0.0
+    max_total_image: 24
+    max_unsynced_video: 2
+    max_synced_video: 2
+    max_oribit_frame: 12
+    hybrid_unsynced_video_prob: 0.5
+
+transform:
+  _target_: src.data.datasets.utils.augmentation.ImageAugmentation
+  apply_aug: true
+  color_jitter:
+    brightness: 0.5
+    constrast: 0.5
+    saturation: 0.5
+    hue: 0.1
+    p: 0.9
+  gray_scale: true
+  gau_blur: false
+

@@ -1,0 +1,16 @@
+# @package datasets.waymo_train_spec
+
+ROOT: "/cos_zw1/share_304064442/hunyuan/yanqinjiang/processed_data/waymo_v2/"
+split: "train_spec"
+resolution: [476, 364]
+aug_crop: 1.0
+normalize_camera_pose: true
+normalize_point_cloud: true
+seed: null # dummy
+patch_size: 14
+
+dataset_info: null
+data_sampling_info: null
+
+transform: null
+

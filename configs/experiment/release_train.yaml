@@ -1,0 +1,479 @@
+# @package _global_
+
+# global cfg
+paths:
+  output_root: outputs
+  exp_name: release_train
+test: false
+
+ckpt_path: null
+# default params in models/default.yaml
+model:
+  pretrained: pretrained_weight/DA3-GIANT-1.1/converted_model.pth
+  net:
+    backbone_args:
+      use_time_embed: true # tmp
+      time_embed_start_idx: 13
+      freeze_backbone_layers: -1 # tmp
+      checkpointing_prepare: false
+      checkpointing_start_idx: 32
+    head_args:
+      dim_in: 3072
+    cam_args:
+      cam_dec:
+        dim_in: 3072
+    st_mod_args:
+      embed_dim: 512
+      detach_pts3d: true
+      detach_feats: false
+      resize_factor: 1
+      dynamic_topk: 0.2
+      weight_dynamic_score: false
+      weight_dynamic_score_detach: true
+      weight_dynamic_score_alpha: 0.3
+      scale_time_embed: true
+      scale_time_embed_by_sp_adaln: false
+      use_time_embed: true
+      use_time_embed_feat: false
+      motion_dim: 9
+      num_block: 8
+      spatial_temporal_feature_idx: [1, 3, 5, 7]
+      temporal_attn_layer_idx: []
+      spatial_attn_layer_idx: []
+      mask_attn_layer_idx: [0, 2, 4, 6]
+      cross_attn_layer_idx: [0, 1, 2, 3, 4, 5, 6, 7]
+      use_checkpointing: true
+    offset_head_args:
+      dim_in: 3072
+      patch_size: 14
+      resize_factor: 1
+      motion_field_num_level: 4
+      motion_dim: 9
+      pred_offset_num_level: 4
+      use_motion_max_pooling: true
+      num_point: 9
+      pred_conf: true
+      use_checkpointing: true
+    trajectory_mod_args:
+      num_point: 9
+      patch_size: 14
+      detach_pts3d: false
+      fixed_offset_level: []
+      ms_deform_level: [0, 1, 2, 3]
+      use_w_dynamic: true
+      w_dynamic_st: true
+      interpolate_dynamic_mask: true
+      resize_factor: 1
+      use_time_info: true
+      use_checkpointing: true # tmp
+    # training
+    pts3d_mode: ray # tmp
+    pretrain: false
+  optimizer:
+    betas:
+    - 0.9
+    - 0.95
+    new_params_list: ["st_mod", "offset_head", "trajectory_mod", "video_idx_embed", "local_time_idx_embed"] # "offset_head.scratch.output_conv2.2"
+    pretrained_params_list: ["backbone"]
+    param_groups:
+      pretrained:
+        lr: 2e-05
+        weight_decay: 0.05
+      backbone:
+        lr: 1e-04 #
+        weight_decay: 0.05
+      new:
+        lr: 2e-04
+        weight_decay: 0.05
+  train_criterion:
+    _target_: src.losses.loss_container.LossContainer
+    weights: [1.0, 1.0, 1.0, 1.0, 0.01] # [0.1, 0.1, 10.0, 0.01]
+    losses:
+      - _target_: src.losses.basic_losses.CameraPoseLoss
+        loss_type: l1
+        gamma: 0.6
+      - _target_: src.losses.basic_losses.DepthLoss
+        gamma: 1.0
+        alpha: 0.2
+        gradient_loss_fn: "grad" # tmp_debug # grad
+        valid_range: 0.98
+        norm: l1
+      - _target_: src.losses.basic_losses.RayLoss
+        gamma: 1.0
+        alpha: 0.2
+        gradient_loss_fn: "" # tmp_debug # grad
+        valid_range: 0.98
+        use_conf_loss: true
+        norm: l1
+      - _target_: src.losses.basic_losses.Trajectory3DLoss
+        gamma: 1.0
+        alpha: 0.2
+        gradient_loss_fn: ""
+        valid_range: 0.98
+        foreground_weight: 1.0 # note important
+        foreground_prob: 0.7
+        use_conf_loss: true
+        # use_velocity_loss: true
+        # velocity_weight: 10.0
+        norm: l2
+      - _target_: src.losses.basic_losses.DynamicScoreLoss
+        movement_threshold: 0.001
+        loss_weight: [1.0, 1.0]
+        token_mask: false
+        use_bce: true
+    
+  scheduler:
+    warmup_epochs: 3
+
+# default params in datasets/*.yaml
+datasets:
+  ue:
+    ROOT: ""
+    resolution: [504, 280]
+    split: "/apdcephfs/private_yanqinjiang/project/dream4d/preprocess/ue/filter_data/filter_motion_object_num/pre_data/merged_pre_scene_info_train_20260118_new_sampled_v2.json"
+    data_sampling_info:
+      static_image:
+        sampling_ratio: 0.0
+        max_total_image: 24
+      unsynced_dynamic_video:
+        sampling_ratio: 0.15
+        min_total_image: 16
+        max_total_image: 16
+        min_unsynced_video: 2
+        max_unsynced_video: 3
+        num_frame_interval_range: [1, 2]
+        num_clip_interval_range: [1, 6]
+      synced_dynamic_video:
+        sampling_ratio: 0.7
+        min_total_image: 16
+        max_total_image: 16
+        min_synced_video: 1
+        max_synced_video: 1
+        num_frame_interval_range: [1, 2]
+      hybrid_dynamic_video:
+        sampling_ratio: 0.15
+        min_total_image: 16
+        max_total_image: 16
+        min_unsynced_video: 1
+        max_unsynced_video: 1
+        max_synced_video: 0
+        min_static_image: 1
+        max_oribit_frame: 6
+        hybrid_unsynced_video_prob: 1.0
+        num_frame_interval_range: [1, 2]
+  waymo:
+    ROOT: ""
+    resolution: [504, 280]
+    split: "/apdcephfs/private_yanqinjiang/project/dream4d/preprocess/waymo/filter_data/waymo_v2_processed_veh.json" 
+    data_sampling_info:
+      static_image:
+        sampling_ratio: 0.0
+        max_total_image: 24
+      unsynced_dynamic_video:
+        sampling_ratio: 0.3
+        min_total_image: 16
+        max_total_image: 16
+        min_unsynced_video: 2
+        max_unsynced_video: 4
+        num_frame_interval_range: [1, 2]
+        num_clip_interval_range: [1, 6]
+      synced_dynamic_video:
+        sampling_ratio: 0.7
+        min_total_image: 16
+        max_total_image: 16
+        min_synced_video: 1
+        max_synced_video: 1
+        num_frame_interval_range: [1, 3]
+      hybrid_dynamic_video:
+        sampling_ratio: 0.0
+        min_total_image: 16
+        max_total_image: 16
+        min_unsynced_video: 1
+        max_unsynced_video: 1
+        max_synced_video: 0
+        min_static_image: 1
+        max_oribit_frame: 3
+        hybrid_unsynced_video_prob: 1.0
+        num_frame_interval_range: [1, 2]
+  dynamic_replica:
+    ROOT: ""
+    resolution: [504, 280]
+    split: "/apdcephfs/private_yanqinjiang/project/dream4d/preprocess/dynamic_replica/filter_data/dynamic_replica_processed.json"
+    data_sampling_info:
+      static_image:
+        sampling_ratio: 0.0
+        max_total_image: 24
+      unsynced_dynamic_video:
+        sampling_ratio: 0.0
+        min_total_image: 16
+        max_total_image: 16
+        min_unsynced_video: 2
+        max_unsynced_video: 2
+        num_frame_interval_range: [1, 2]
+        num_clip_interval_range: [1, 6]
+      synced_dynamic_video:
+        sampling_ratio: 1.0
+        min_total_image: 16
+        max_total_image: 16
+        min_synced_video: 1
+        max_synced_video: 1
+        num_frame_interval_range: [1, 2]
+      hybrid_dynamic_video:
+        sampling_ratio: 0.0
+        min_total_image: 16
+        max_total_image: 16
+        min_unsynced_video: 1
+        max_unsynced_video: 1
+        max_synced_video: 0
+        min_static_image: 1
+        max_oribit_frame: 3
+        hybrid_unsynced_video_prob: 1.0
+        num_frame_interval_range: [1, 2]
+  dl3dv:
+    ROOT: ""
+    resolution: [504, 280]
+    split: "/apdcephfs/private_yanqinjiang/project/dream4d/preprocess/dl3dv/filter_data/dl3dv_processed.json"
+    dataset_info:
+      num_sample_image_pool: 50 
+    data_sampling_info:
+      static_image:
+        sampling_ratio: 1.0
+        min_total_image: 16
+        max_total_image: 16
+      unsynced_dynamic_video:
+        sampling_ratio: 0.0
+        min_total_image: 16
+        max_total_image: 16
+        min_unsynced_video: 2
+        max_unsynced_video: 2
+        num_frame_interval_range: [1, 2]
+        num_clip_interval_range: [1, 6]
+      synced_dynamic_video:
+        sampling_ratio: 0.0
+        min_total_image: 16
+        max_total_image: 16
+        min_synced_video: 1
+        max_synced_video: 1
+        num_frame_interval_range: [1, 2]
+      hybrid_dynamic_video:
+        sampling_ratio: 0.0
+        min_total_image: 16
+        max_total_image: 16
+        min_unsynced_video: 1
+        max_unsynced_video: 1
+        max_synced_video: 0
+        min_static_image: 1
+        max_oribit_frame: 3
+        hybrid_unsynced_video_prob: 1.0
+        num_frame_interval_range: [1, 2]
+  point_odyssey:
+    ROOT: ""
+    resolution: [504, 280]
+    split: "/apdcephfs/private_yanqinjiang/project/dream4d/preprocess/point_odyssey/filter_data/point_odyssey_processed.json"
+    data_sampling_info:
+      static_image:
+        sampling_ratio: 0.0
+        max_total_image: 24
+      unsynced_dynamic_video:
+        sampling_ratio: 0.0
+        min_total_image: 16
+        max_total_image: 16
+        min_unsynced_video: 2
+        max_unsynced_video: 2
+        num_frame_interval_range: [1, 2]
+        num_clip_interval_range: [1, 6]
+      synced_dynamic_video:
+        sampling_ratio: 1.0
+        min_total_image: 16
+        max_total_image: 16
+        min_synced_video: 1
+        max_synced_video: 1
+        num_frame_interval_range: [1, 3]
+      hybrid_dynamic_video:
+        sampling_ratio: 0.0
+        min_total_image: 16
+        max_total_image: 16
+        min_unsynced_video: 1
+        max_unsynced_video: 1
+        max_synced_video: 0
+        min_static_image: 1
+        max_oribit_frame: 3
+        hybrid_unsynced_video_prob: 1.0
+        num_frame_interval_range: [1, 2]
+  omnigame:
+    ROOT: ""
+    resolution: [504, 280]
+    split: "/apdcephfs/private_yanqinjiang/project/dream4d/preprocess/omnigame/filter_data/omnigame_processed.json" 
+    data_sampling_info:
+      static_image:
+        sampling_ratio: 0.0
+        max_total_image: 24
+      unsynced_dynamic_video:
+        sampling_ratio: 0.0
+        max_total_image: 24
+        max_unsynced_video: 3
+      synced_dynamic_video:
+        sampling_ratio: 1.0
+        min_total_image: 16
+        max_total_image: 16
+        min_synced_video: 1
+        max_synced_video: 1
+        num_frame_interval_range: [1, 2]
+      hybrid_dynamic_video:
+        sampling_ratio: 0.0
+        max_total_image: 24
+        max_unsynced_video: 2
+        max_synced_video: 2
+        max_oribit_frame: 12
+        hybrid_unsynced_video_prob: 0.5
+  stereo4d:
+    ROOT: ""
+    resolution: [504, 280]
+    split: "/apdcephfs/private_yanqinjiang/project/dream4d/preprocess/stereo4d/filter_data/stereo4d_processed.json" 
+    data_sampling_info:
+      static_image:
+        sampling_ratio: 0.0
+        max_total_image: 24
+      unsynced_dynamic_video:
+        sampling_ratio: 0.0
+        max_total_image: 24
+        max_unsynced_video: 3
+      synced_dynamic_video:
+        sampling_ratio: 1.0
+        min_total_image: 16
+        max_total_image: 16
+        min_synced_video: 1
+        max_synced_video: 1
+        num_frame_interval_range: [1, 2]
+      hybrid_dynamic_video:
+        sampling_ratio: 0.0
+        max_total_image: 16
+        max_unsynced_video: 2
+        max_synced_video: 2
+        max_oribit_frame: 12
+        hybrid_unsynced_video_prob: 0.5
+  hoi4d:
+    ROOT: ""
+    resolution: [504, 280]
+    split: "/apdcephfs/private_yanqinjiang/project/dream4d/preprocess/hoi4d/filter_data/hoi4d_processed.json"
+    data_sampling_info:
+      static_image:
+        sampling_ratio: 0.0
+        max_total_image: 24
+      unsynced_dynamic_video:
+        sampling_ratio: 0.0
+        min_total_image: 16
+        max_total_image: 16
+        min_unsynced_video: 2
+        max_unsynced_video: 2
+        num_frame_interval_range: [1, 2]
+        num_clip_interval_range: [1, 6]
+      synced_dynamic_video:
+        sampling_ratio: 1.0
+        min_total_image: 16
+        max_total_image: 16
+        min_synced_video: 1
+        max_synced_video: 1
+        num_frame_interval_range: [1, 3]
+      hybrid_dynamic_video:
+        sampling_ratio: 0.0
+        max_total_image: 16
+        min_unsynced_video: 1
+        max_unsynced_video: 1
+        max_synced_video: 0
+        min_static_image: 1
+        max_oribit_frame: 3
+        hybrid_unsynced_video_prob: 1.0
+        num_frame_interval_range: [1, 2]
+  spring:
+    ROOT: ""
+    resolution: [504, 280]
+    split: "/apdcephfs/private_yanqinjiang/project/dream4d/preprocess/spring/filter_data/spring_processed.json" 
+    dataset_info:
+      dataset_name: spring_debug
+    data_sampling_info:
+      static_image:
+        sampling_ratio: 0.0
+        max_total_image: 24
+      unsynced_dynamic_video:
+        sampling_ratio: 0.0
+        max_total_image: 24
+        max_unsynced_video: 3
+      synced_dynamic_video:
+        sampling_ratio: 1.0
+        min_total_image: 16
+        max_total_image: 16
+        min_synced_video: 1
+        max_synced_video: 1
+        num_frame_interval_range: [1, 2]
+      hybrid_dynamic_video:
+        sampling_ratio: 0.0
+        max_total_image: 4
+        min_unsynced_video: 1
+        max_unsynced_video: 1
+        max_synced_video: 0
+        min_static_image: 1
+        max_oribit_frame: 1
+        hybrid_unsynced_video_prob: 1.0
+  ue_test:
+    ROOT: ""
+    split: "/apdcephfs/private_yanqinjiang/project/dream4d/preprocess/ue/json_file/scene_info_20260118_val_hybrid_nj_64.json"
+    resolution: [504, 280]
+    dataset_info:
+      dataset_name: ue_test_single_hybrid
+
+
+# default params in data_module/default.yaml
+data_module:
+  num_workers: 3
+  num_workers_val: 1
+  pin_memory: true
+  images_per_gpu: 16
+  aspect_ratio_range: [1.0, 1.0]
+  train_datasets:
+    - class: ue
+      size: 10800
+      args: ${datasets.ue}
+    - class: dynamic_replica
+      size: 1080
+      args: ${datasets.dynamic_replica}
+    - class: waymo
+      size: 6480
+      args: ${datasets.waymo}
+    - class: point_odyssey
+      size: 10240
+      args: ${datasets.point_odyssey}
+    - class: dl3dv
+      size: 1080
+      args: ${datasets.dl3dv}
+    - class: omnigame
+      size: 5400
+      args: ${datasets.omnigame}
+    - class: stereo4d
+      size: 1080
+      args: ${datasets.stereo4d}
+    - class: spring
+      size: 1080
+      args: ${datasets.spring}
+    - class: hoi4d
+      size: 1080
+      args: ${datasets.hoi4d}
+  validation_datasets:
+    - class: ue_test
+      args: ${datasets.ue_test}
+  
+# default params in trainer/default.yaml
+trainer:
+  log_every_n_steps: 50
+  max_epochs: 320
+  check_val_every_n_epoch: 1
+  num_sanity_val_steps: 0
+  gradient_clip_val: 1.0
+  gradient_clip_algorithm: "norm"
+
+visualizer:
+  save_nums: 0
+
+# saving cfg:
+save_every_n_epochs: 2
+

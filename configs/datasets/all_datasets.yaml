@@ -1,0 +1,35 @@
+# @package _global_
+# list all avaliable datasets
+
+defaults:
+  - waymo
+  - waymo_test
+  - waymo_train_spec
+  - ue
+  - ue_test
+  - ue_fit
+  - omnigame
+  - omnigame_test
+  - omnigame_fit
+  - dynamic_replica
+  - dynamic_replica_test
+  - dynamic_replica_fit
+  - stereo4d
+  - stereo4d_test
+  - stereo4d_fit
+  - spring
+  - spring_test
+  - spring_fit
+  - hoi4d
+  - hoi4d_test
+  - hoi4d_fit
+  - point_odyssey
+  - point_odyssey_test
+  - point_odyssey_fit
+  - dl3dv
+  - dl3dv_test
+  - dl3dv_fit
+  - droid
+  - droid_test
+  - droid_fit
+  

@@ -1,0 +1,61 @@
+# --------- lightning --------- #
+lightning>=2.5.0
+lightning-bolts
+lightning-utilities
+torchmetrics
+torchinfo
+
+# --------- hydra --------- #
+hydra-core
+hydra-colorlog
+hydra-optuna-sweeper
+
+# --------- loggers --------- #
+wandb
+
+# --------- others --------- #
+rootutils       # standardizing the project root setup
+pre-commit      # hooks for applying linters on commit
+rich==13.3.5    # beautiful text formatting in terminal
+pytest          # tests
+nvitop
+
+# --------- project core --------- #
+numpy<2.0.0  # for compatibility with Open3D 0.18.0
+trimesh
+roma
+open3d==0.18.0
+einops
+deepspeed
+gradio
+matplotlib
+tqdm
+jupyterlab
+opencv-python
+viser
+pillow_heif
+plotly
+scikit-image
+scikit-learn
+scipy
+seaborn
+pyglet<2
+huggingface-hub[torch]>=0.22
+ninja
+jaxtyping
+h5py
+lpips 
+colorspacious
+moviepy==1.0.3
+plyfile
+kornia
+dacite
+
+######## additional
+pytorch3d==0.7.7
+OpenEXR
+
+# git
+git+https://github.com/facebookresearch/pytorch3d@v0.7.7
+git+https://github.com/ByteDance-Seed/Depth-Anything-3.git
+git+https://github.com/nerfstudio-project/gsplat.git

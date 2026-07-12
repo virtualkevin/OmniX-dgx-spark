@@ -1,0 +1,12 @@
+# @package data_module
+
+_target_: src.data.data_module.CustomDataModule
+
+train_datasets: null # fill in exp
+validation_datasets: null # fill in exp
+images_per_gpu: 24
+num_workers: 12
+num_workers_val: 2
+pin_memory: true
+aspect_ratio_range: [0.33, 1.0]
+   
