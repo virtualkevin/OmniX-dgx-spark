@@ -1,0 +1,15 @@
+.git
+.gitignore
+outputs
+wandb
+lightning_logs
+pretrained_weight/*.ckpt
+pretrained_weight/*.pth
+pretrained_weight/**/*.ckpt
+pretrained_weight/**/*.pth
+**/__pycache__
+**/*.pyc
+dependencies/Deformable_DETR/models/ops/build
+dependencies/Deformable_DETR/models/ops/dist
+dependencies/Deformable_DETR/models/ops/*.egg-info
+dependencies/Deformable_DETR/models/ops/**/*.so

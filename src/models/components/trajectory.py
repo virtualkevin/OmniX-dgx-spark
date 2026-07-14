@@ -115,6 +115,7 @@ class TrajectoryMod(torch.nn.Module):
                     ),
                     *fixed_offset_motion_field_list,
                     fixed_offset_sampling_weights,
+                    use_reentrant=False,
                 )
             else:
                 fixed_offset_weighted_values = self.fixed_offset_attention_weighted_cuda(fixed_offset_motion_field_list, fixed_offset_sampling_weights)
@@ -145,6 +146,7 @@ class TrajectoryMod(torch.nn.Module):
                     *ms_deform_motion_field_list,
                     sampling_offsets,
                     ms_deform_sampling_weights,
+                    use_reentrant=False,
                 )
             else:
                 ms_deform_weighted_values = self.msdeform_attention_weighted_cuda(
@@ -339,7 +341,7 @@ class TrajectoryMod(torch.nn.Module):
             # 切片 (Slicing creates a view, low overhead)
             value_chunk = value_flat[..., start_idx:end_idx].unsqueeze(2).contiguous()
             
-            with torch.cuda.amp.autocast(enabled=False):
+            with torch.amp.autocast("cuda", enabled=False):
                 # num_head=1, channels=chunk_size
                 # 显存消耗极小，只计算当前 chunk
                 out_chunk = MSDeformAttnFunction.apply(
