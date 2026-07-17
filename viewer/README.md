@@ -1,33 +1,42 @@
 # OmniX 4D viewer
 
-This directory contains the local React Three Fiber viewer and the restricted
-Python converter that turns one supported OmniX `predictions.pt` into the
-browser-native `.omx4d` payload. The baked sample works without the API; opening
-another `.pt` requires the API to be running.
+This directory contains a static React Three Fiber application that opens the
+OmniX `predictions.pt` output directly in the browser. Raw tensor storage is
+read and sampled in a Web Worker; the selected file is never uploaded and no
+Python runtime or application server is involved. A compact `.omx4d` deer
+sample remains bundled so the first screen is useful before a file is selected.
 
-The browser requests only relative URLs:
+The only network requests made by the application are ordinary same-origin
+requests for its JavaScript, CSS, worker bundle, and baked sample. Selecting a
+`.pt`, audio file, or video file creates browser-local data and does not issue a
+request containing that file.
 
-- `GET /sample/deer.omx4d` loads the baked sample.
-- `GET /api/health` reports converter limits.
-- `POST /api/convert` accepts multipart fields `file`, `point_budget`, and `fps`.
+## Supported `.pt` contract
+
+`.pt` is a filename convention, not a universal interchange format. The viewer
+accepts the exact plain-tensor archive written by this repository: a little-
+endian, ZIP-based `torch.save` file whose root is a dictionary with four dense,
+contiguous CPU float32 tensors.
+
+| Key | Shape | Meaning |
+| --- | --- | --- |
+| `trajectory` | `[source view, frame, height, width, 3]` | World-space xyz trajectory |
+| `camera_pose` | `[source view, 3, 4]` | OpenCV camera-to-world pose |
+| `intrinsics` | `[source view, 3, 3]` | Camera intrinsic matrix |
+| `pts3d_dynamic_score` | `[source view, height, width]` | Per-source-pixel motion probability |
+
+The worker does not contain a general Python pickle implementation. It reads a
+small, explicitly whitelisted metadata grammar, treats tensor reconstruction
+symbols as inert descriptors, validates storage sizes and contiguous strides,
+and rejects every other object, global, device, dtype, compression method, or
+schema. Model checkpoints and arbitrary third-party `.pt` files are not
+supported.
 
 ## Run locally for development
 
-Prerequisites are Node.js 20.19 or newer, pnpm 10.22.0, Python 3.11 or newer,
-and enough local RAM for the selected `.pt`. Run commands from the repository
-root unless a command changes directory.
-
-Create the API environment and start the API in terminal 1:
-
-```bash
-python3 -m venv .venv-viewer
-source .venv-viewer/bin/activate
-python -m pip install --upgrade pip
-python -m pip install -r viewer/server/requirements.txt
-uvicorn viewer.server.app:app --host 127.0.0.1 --port 8000 --workers 1
-```
-
-Install and start the Vite application in terminal 2:
+Prerequisites are Node.js 20.19 or newer, pnpm 10.22.0, a modern desktop browser
+with WebGL and module-worker support, and enough browser memory for the selected
+quality. Run:
 
 ```bash
 cd viewer
@@ -35,79 +44,55 @@ pnpm install --frozen-lockfile
 pnpm dev
 ```
 
-Open [http://127.0.0.1:4173](http://127.0.0.1:4173). Vite proxies `/api` to
-`http://127.0.0.1:8000`. Use **Open .pt** or drag a supported `predictions.pt`
-onto the viewer. The optional media picker keeps a local audio or video file as
-the playback clock; it does not upload that media to the API.
+Open [http://127.0.0.1:4173](http://127.0.0.1:4173), then use **Open .pt** or
+drop a supported `predictions.pt` onto the viewer. The worker reports local
+read/validation/sampling progress and transfers only renderer-ready arrays back
+to the UI thread. The optional media picker uses a local audio or video file as
+the playback clock and keeps its existing audio synchronized with the 3D data.
 
-Check the local API directly:
+The production build is also a set of static files:
 
 ```bash
-curl --fail http://127.0.0.1:8000/api/health
+cd viewer
+pnpm build
+pnpm exec vite preview --host 127.0.0.1 --port 4173
 ```
 
-Convert without the browser:
+Opening `dist/index.html` directly with a `file:` URL is not supported because
+browsers restrict module workers and asset requests on opaque origins. Any
+ordinary static HTTP host is sufficient; there is no conversion backend.
+
+## Run the static Docker image
+
+The Compose profile builds the frontend and serves it from an unprivileged
+Nginx container. It does not build the OmniX/PyTorch image and contains no API
+service:
 
 ```bash
-python -m viewer.server /absolute/path/to/predictions.pt /tmp/result.omx4d \
-  --point-budget 100000 --fps 15 \
-  --image-dir /absolute/path/to/gt_images
-```
-
-The HTTP equivalent is:
-
-```bash
-curl --fail-with-body http://127.0.0.1:8000/api/convert \
-  --form file=@/absolute/path/to/predictions.pt \
-  --form point_budget=100000 \
-  --form fps=15 \
-  --output /tmp/result.omx4d
-```
-
-## Run the isolated Docker stack
-
-The API image intentionally extends the repository's `omnix-dgx-spark:latest`
-image so its patched PyTorch runtime is reused. Build that base once, then start
-the API and production web server:
-
-```bash
-docker build --file Dockerfile.spark --tag omnix-dgx-spark:latest .
 docker compose --file viewer/compose.yaml up --build
 ```
 
-Open [http://127.0.0.1:4173](http://127.0.0.1:4173). Only the web proxy is
-published, and it is bound to loopback; the API is reachable through
-`http://127.0.0.1:4173/api/health` but has no host port of its own.
-
-Stop the stack and remove its ephemeral containers:
+Open [http://127.0.0.1:4173](http://127.0.0.1:4173). The port binds to loopback,
+the root filesystem is read-only, all Linux capabilities are dropped, and
+`no-new-privileges` is enabled. Stop it with:
 
 ```bash
 docker compose --file viewer/compose.yaml down
 ```
 
-The Compose profile applies a 12 GiB memory ceiling, four-CPU quota, PID and
-open-file limits, a 3 GiB per-file limit, and a 4 GiB temporary filesystem to
-the converter. It also runs both services with read-only roots, all Linux
-capabilities dropped, and `no-new-privileges`. The app's 300-second conversion
-deadline is a separate wall-clock limit. Tune these deliberately in
-`viewer/compose.yaml` if a trusted dataset requires different ceilings; keep the
-proxy's `client_max_body_size` and timeouts in `viewer/nginx.conf` aligned.
-
-The web Dockerfile also exposes a development target if a containerized Vite
-process is useful:
+The Dockerfile also exposes a Vite development target:
 
 ```bash
 docker build --file viewer/Dockerfile --target development --tag omnix-viewer-dev .
 docker run --rm --publish 127.0.0.1:4173:4173 omnix-viewer-dev
 ```
 
-That standalone development container serves the baked sample, but `.pt`
-upload needs a reachable API. The Compose stack is the supported all-in-one
-container route.
+Both container routes support local `.pt` selection because conversion happens
+inside the visiting browser rather than inside the container.
 
 ## Verify changes
 
-Run frontend type checks, unit tests, and a production build:
+Run type checks, unit tests, and a production build:
 
 ```bash
 cd viewer
@@ -116,15 +101,7 @@ pnpm test
 pnpm build
 ```
 
-Run the Python converter tests from the repository root with the API virtual
-environment active:
-
-```bash
-python -m pip install -r viewer/server/requirements-dev.txt
-python -m pytest viewer/server/tests
-```
-
-Install the browser once and run the Chromium smoke suite:
+Install Chromium once and run the real-browser suite:
 
 ```bash
 cd viewer
@@ -132,56 +109,56 @@ pnpm exec playwright install chromium
 pnpm test:e2e
 ```
 
-The full release gate can drive an actual OmniX archive through the browser and
-local API. The path must be absolute; without it, that expensive test is skipped:
+The unit suite includes synthetic ZIP, pickle, schema, sampling, and streaming
+converter fixtures; the browser suite covers malformed-input recovery. The
+release gate additionally opens the actual OmniX archive through the complete
+worker path. The path must be absolute; without it, the expensive test is
+skipped:
 
 ```bash
 OMNIX_REAL_PT=/absolute/path/to/predictions.pt pnpm test:e2e
 ```
 
-For a Docker configuration-only check that does not start containers:
+That test selects the file through Chromium, verifies that no `/api` or upload
+request occurs, waits for the renderer-ready dataset, and exercises WebGL
+playback. Validate the static container definition separately with:
 
 ```bash
 docker compose --file viewer/compose.yaml config --quiet
 ```
 
-## Converter configuration
+## Performance and limits
 
-All numeric settings must be positive. Values are bytes unless noted.
-
-| Variable | Default | Purpose |
-| --- | ---: | --- |
-| `OMX_MAX_UPLOAD_BYTES` | 1,073,741,824 | Maximum streamed request file |
-| `OMX_MAX_ARCHIVE_BYTES` | 8,589,934,592 | Maximum expanded ZIP contents |
-| `OMX_MAX_TENSOR_BYTES` | 8,589,934,592 | Maximum validated tensor storage |
-| `OMX_MAX_OUTPUT_BYTES` | 2,147,483,648 | Maximum `.omx4d` output |
-| `OMX_MAX_SOURCE_VIEWS` | 64 | Maximum source views |
-| `OMX_MAX_FRAMES` | 600 | Maximum target frames |
-| `OMX_MAX_SOURCE_PIXELS` | 16,000,000 | Maximum pixels over source views |
-| `OMX_MAX_POINT_BUDGET` | 200,000 | Maximum requested sampled points |
-| `OMX_MAX_ZIP_ENTRIES` | 512 | Maximum archive entries |
-| `OMX_MAX_COMPRESSION_RATIO` | 200 | Maximum ratio for large ZIP entries |
-| `OMX_FINITE_CHUNK_ELEMENTS` | 8,000,000 | Finite-check chunk size |
-| `OMX_CONVERSION_TIMEOUT` | 300 | Conversion seconds after upload |
-| `OMX_UPLOAD_CHUNK_BYTES` | 1,048,576 | Request streaming chunk size |
-| `OMX_TEMP_DIRECTORY` | system temp | Temporary source/output directory |
+- The default 100k selection produces about 20 MiB of positions for the
+  16-frame deer sequence; 50k and 200k quality options trade detail for memory.
+- The worker uses `File.slice()` and bounded tensor chunks. It does not first
+  copy a 400+ MiB archive into one JavaScript `ArrayBuffer`.
+- Every trajectory value still has to be read and validated locally. Large
+  files therefore take time proportional to their tensor storage even when the
+  rendered point budget is small.
+- Parsing and sampling stay off the UI thread. The final sampled positions,
+  scores, colors, camera matrices, and source identities are transferred rather
+  than cloned.
+- Playback uses one Three.js points draw call and updates the GPU position
+  attribute only when the discrete inference frame changes.
+- Browser memory and typed-array ceilings vary. Use 50k on constrained devices;
+  closing the tab releases all selected-file and GPU state.
 
 ## Security and privacy
 
-- The API accepts only the exact plain-tensor OmniX schema. It uses
-  `torch.load(..., weights_only=True, map_location="cpu")` and never falls back
-  to unrestricted pickle loading. This reduces code-execution exposure but does
-  not make arbitrary `.pt` files safe from resource-exhaustion attempts.
-- Uploads are streamed to temporary storage, checked against archive, tensor,
-  shape, dtype, finite-value, and output limits, and deleted after the response,
-  failure, cancellation, or timeout. The service does not persist datasets.
-- The converter has no authentication and is designed for one trusted local
-  operator. Do not bind it or the proxy to a LAN/public interface without an
-  authenticated, rate-limited isolation layer.
-- The API stays exclusively on a Docker network with no external route. Nginx
-  also joins a separate edge network, but its only published port binds to
-  `127.0.0.1`. Container limits are defense in depth, not a guarantee that a
-  hostile PyTorch archive cannot exploit a native-library defect. Keep the Spark
-  base and PyTorch packages patched.
-- Selected audio/video remains a browser-local object URL. A `.pt` is sent only
-  to the local converter endpoint configured by the page origin.
+- Treat every selected `.pt` as untrusted data. Extension and MIME type are
+  hints only; archive structure, entry names, metadata grammar, tensor shapes,
+  storage lengths, finite values, camera matrices, and configured resource
+  ceilings are checked before rendering.
+- Pickle globals and reductions are parsed only as tokens in the allowlisted
+  tensor descriptor grammar. They are never imported, invoked, or evaluated.
+- Browser-only parsing removes the network upload and native PyTorch loading
+  surfaces, but it cannot prevent a deliberately expensive local file from
+  consuming CPU or tab memory. The worker enforces limits and supports
+  cancellation; browser process isolation remains an additional boundary.
+- Selected `.pt`, audio, and video files remain on the user's device. There are
+  no credentials, temporary server files, analytics, persistence, or outbound
+  conversion requests.
+- Host the static build with the supplied security headers or equivalent. The
+  provided container binds only to `127.0.0.1`; review authentication and origin
+  policy before exposing any deployment publicly.

@@ -19,4 +19,3 @@ viewer/coverage
 viewer/.vite
 viewer/playwright-report
 viewer/test-results
-.venv-viewer

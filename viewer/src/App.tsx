@@ -34,7 +34,6 @@ import {
   type ReactNode,
 } from 'react'
 import { ViewerScene } from './components/Scene'
-import { mapApiError, type ApiFailure } from './lib/api'
 import type { ColorMode, RenderSettings, ViewerDataset } from './lib/dataset'
 import { DecoderClient } from './lib/decoder-client'
 import {
@@ -46,12 +45,18 @@ import {
   timeForFrame,
 } from './lib/playback'
 
-type LoadPhase = 'sample' | 'ready' | 'uploading' | 'converting' | 'decoding' | 'error'
+type LoadPhase = 'sample' | 'ready' | 'processing' | 'error'
+
+interface LoadFailure {
+  title: string
+  detail: string
+}
 
 interface LoadState {
   phase: LoadPhase
   progress?: number
-  error?: ApiFailure
+  status?: string
+  error?: LoadFailure
 }
 
 interface MediaState {
@@ -73,7 +78,7 @@ const defaultSettings: RenderSettings = {
   cameraFrusta: false,
 }
 
-const MAX_UPLOAD_BYTES = 1024 ** 3
+const MAX_PT_FILE_BYTES = 1024 ** 3
 
 function supportsWebGl(): boolean {
   try {
@@ -81,14 +86,6 @@ function supportsWebGl(): boolean {
     return Boolean(canvas.getContext('webgl2') || canvas.getContext('webgl'))
   } catch {
     return false
-  }
-}
-
-function apiBodyFromArrayBuffer(buffer: ArrayBuffer): string {
-  try {
-    return new TextDecoder().decode(buffer)
-  } catch {
-    return ''
   }
 }
 
@@ -150,7 +147,7 @@ export default function App() {
   const [volume, setVolume] = useState(0.8)
   const [syncOffset, setSyncOffset] = useState(0)
   const decoderRef = useRef<DecoderClient | null>(null)
-  const uploadRef = useRef<XMLHttpRequest | null>(null)
+  const conversionRef = useRef<AbortController | null>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const mediaInputRef = useRef<HTMLInputElement>(null)
   const mediaRef = useRef<HTMLMediaElement | null>(null)
@@ -178,7 +175,7 @@ export default function App() {
         phase: 'error',
         error: {
           title: 'The baked sample could not be loaded',
-          detail: error instanceof Error ? error.message : 'Check the local viewer server and try again.',
+          detail: error instanceof Error ? error.message : 'Check the static viewer files and try again.',
         },
       })
     }
@@ -191,7 +188,7 @@ export default function App() {
     void loadSample(client, abort.signal)
     return () => {
       abort.abort()
-      uploadRef.current?.abort()
+      conversionRef.current?.abort()
       client.dispose()
       decoderRef.current = null
     }
@@ -246,83 +243,81 @@ export default function App() {
     }
   }, [dataset, player.frame, player.frameCount, player.loop, player.playing, player.rate, seek])
 
-  const uploadPt = useCallback((file: File) => {
-    if (!decoderRef.current) return
+  const uploadPt = useCallback(async (file: File) => {
+    const client = decoderRef.current
+    if (!client) return
     if (!file.name.toLowerCase().endsWith('.pt')) {
       setLoadState({ phase: 'error', error: {
         title: 'Choose an OmniX .pt file',
-        detail: 'The converter accepts the exact plain-tensor predictions.pt schema produced by OmniX.',
+        detail: 'The browser accepts the exact plain-tensor predictions.pt schema produced by OmniX.',
       } })
       return
     }
-    if (file.size > MAX_UPLOAD_BYTES) {
+    if (file.size > MAX_PT_FILE_BYTES) {
       setLoadState({ phase: 'error', error: {
         title: 'The selected file is too large',
-        detail: 'The local viewer accepts files up to 1 GiB.',
+        detail: 'The browser-only reader accepts files up to 1 GiB.',
       } })
       return
     }
 
-    uploadRef.current?.abort()
+    conversionRef.current?.abort()
+    const controller = new AbortController()
+    conversionRef.current = controller
     dispatch({ type: 'setPlaying', playing: false })
     mediaRef.current?.pause()
-    const request = new XMLHttpRequest()
-    uploadRef.current = request
-    request.open('POST', '/api/convert')
-    request.responseType = 'arraybuffer'
-    request.upload.onprogress = (event) => {
-      setLoadState({
-        phase: 'uploading',
-        progress: event.lengthComputable ? event.loaded / event.total : undefined,
-      })
-    }
-    request.upload.onload = () => setLoadState({ phase: 'converting', progress: 1 })
-    request.onerror = () => {
-      uploadRef.current = null
-      setLoadState({
-        phase: 'error',
-        error: { title: 'Could not reach the local converter', detail: 'Start the viewer API and try the upload again.' },
-      })
-    }
-    request.onabort = () => {
-      uploadRef.current = null
-      setLoadState(dataset ? { phase: 'ready' } : { phase: 'sample' })
-    }
-    request.onload = async () => {
-      uploadRef.current = null
-      if (request.status < 200 || request.status >= 300) {
-        setLoadState({ phase: 'error', error: mapApiError(request.status, apiBodyFromArrayBuffer(request.response)) })
+    setLoadState({
+      phase: 'processing',
+      progress: 0,
+      status: 'Opening the archive in your browser',
+    })
+
+    try {
+      const nextDataset = await client.decodePt(
+        file,
+        { pointBudget, fps: player.fps, name: file.name },
+        {
+          signal: controller.signal,
+          onProgress: (progress) => {
+            if (controller.signal.aborted) return
+            setLoadState({
+              phase: 'processing',
+              progress: Math.max(0, Math.min(1, progress.progress)),
+              status: progress.message,
+            })
+          },
+        },
+      )
+      if (controller.signal.aborted) return
+      setDataset(nextDataset)
+      setDatasetName(file.name)
+      setSettings((current) => ({ ...current, selectedView: -1, dynamicThreshold: 0 }))
+      dispatch({ type: 'load', frameCount: nextDataset.manifest.frameCount, fps: nextDataset.manifest.fps || player.fps })
+      setSeekToken((token) => token + 1)
+      setResetToken((token) => token + 1)
+      setLoadState({ phase: 'ready' })
+    } catch (error) {
+      if (error instanceof DOMException && error.name === 'AbortError') {
+        setLoadState(dataset ? { phase: 'ready' } : { phase: 'sample' })
         return
       }
-      setLoadState({ phase: 'decoding' })
-      try {
-        const nextDataset = await decoderRef.current!.decode(request.response as ArrayBuffer)
-        setDataset(nextDataset)
-        setDatasetName(file.name)
-        setSettings((current) => ({ ...current, selectedView: -1, dynamicThreshold: 0 }))
-        dispatch({ type: 'load', frameCount: nextDataset.manifest.frameCount, fps: nextDataset.manifest.fps || player.fps })
-        setSeekToken((token) => token + 1)
-        setResetToken((token) => token + 1)
-        setLoadState({ phase: 'ready' })
-      } catch (error) {
-        setLoadState({ phase: 'error', error: {
-          title: 'The converted payload is invalid',
-          detail: error instanceof Error ? error.message : 'The decoder rejected the renderer payload.',
-        } })
-      }
+      const detail = error instanceof Error && error.message.length <= 400
+        ? error.message
+        : 'The browser rejected this archive before allocating renderer data.'
+      setLoadState({
+        phase: 'error',
+        error: {
+          title: 'The tensors do not match the OmniX schema',
+          detail,
+        },
+      })
+    } finally {
+      if (conversionRef.current === controller) conversionRef.current = null
     }
-
-    const form = new FormData()
-    form.append('file', file)
-    form.append('point_budget', String(pointBudget))
-    form.append('fps', String(player.fps))
-    setLoadState({ phase: 'uploading', progress: 0 })
-    request.send(form)
   }, [dataset, player.fps, pointBudget])
-
   const handleDatasetFile = (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0]
-    if (file) uploadPt(file)
+    if (file) void uploadPt(file)
     event.target.value = ''
   }
 
@@ -350,7 +345,7 @@ export default function App() {
     event.preventDefault()
     setDragActive(false)
     const file = Array.from(event.dataTransfer.files).find((candidate) => candidate.name.toLowerCase().endsWith('.pt'))
-    if (file) uploadPt(file)
+    if (file) void uploadPt(file)
     else setLoadState({ phase: 'error', error: {
       title: 'No .pt file found',
       detail: 'Drop an OmniX predictions.pt file anywhere in the viewer.',
@@ -387,7 +382,7 @@ export default function App() {
   const duration = durationSeconds(player.frameCount, player.fps)
   const timelineProgress = player.frameCount > 1 ? (player.frame / (player.frameCount - 1)) * 100 : 0
   const durationMismatch = Boolean(media?.duration && Math.abs((media.duration - syncOffset) - duration) > 1 / player.fps)
-  const busy = ['uploading', 'converting', 'decoding'].includes(loadState.phase)
+  const busy = loadState.phase === 'processing'
   const warnings = dataset?.manifest.warnings ?? []
 
   return (
@@ -482,24 +477,19 @@ export default function App() {
           <div className="conversion-card" role="status" aria-live="polite">
             <div className="conversion-card__icon"><LoaderCircle className="spinner" /></div>
             <div className="conversion-card__copy">
-              <strong>
-                {loadState.phase === 'uploading' && 'Uploading locally'}
-                {loadState.phase === 'converting' && 'Validating & sampling'}
-                {loadState.phase === 'decoding' && 'Preparing the GPU payload'}
-              </strong>
+              <strong>{loadState.status ?? 'Reading the PyTorch archive locally'}</strong>
               <span>
-                {loadState.phase === 'uploading' && loadState.progress !== undefined
-                  ? `${Math.round(loadState.progress * 100)}% transferred`
-                  : 'Your file stays on this machine.'}
+                {loadState.progress !== undefined
+                  ? `${Math.round(loadState.progress * 100)}% complete · no file data leaves this browser`
+                  : 'The selected file stays inside this browser.'}
               </span>
             </div>
-            {loadState.phase === 'uploading' && loadState.progress !== undefined && (
+            {loadState.progress !== undefined && (
               <div className="progress"><span style={{ width: `${loadState.progress * 100}%` }} /></div>
             )}
-            <button type="button" className="button button--quiet" onClick={() => uploadRef.current?.abort()}>Cancel</button>
+            <button type="button" className="button button--quiet" onClick={() => conversionRef.current?.abort()}>Cancel</button>
           </div>
         )}
-
         {dragActive && (
           <div className="drop-overlay">
             <div><FileUp size={30} /><strong>Drop predictions.pt</strong><span>Validate and open in this scene</span></div>
@@ -625,7 +615,7 @@ export default function App() {
               {warnings.map((warning) => <p key={warning}><AlertTriangle size={13} />{warning}</p>)}
             </div>
           )}
-          <p className="privacy-note">The browser never deserializes PyTorch pickle. The local API validates tensors and returns this bounded renderer format.</p>
+          <p className="privacy-note">The worker reads a restricted, non-executing subset of the PyTorch archive format. The selected .pt file never leaves this browser.</p>
         </aside>
       )}
 
