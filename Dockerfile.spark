@@ -1,0 +1,24 @@
+FROM nvcr.io/nvidia/pytorch:25.11-py3@sha256:417cbf33f87b5378849df37983552cd1f8bc8b62fe1ceabe004de816a55dff21
+
+ARG DEBIAN_FRONTEND=noninteractive
+ARG DA3_COMMIT=e74fd796e96b7e781a5506fd8503b6bd7232513c
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ffmpeg git \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY requirements-spark.txt /tmp/requirements-spark.txt
+RUN pip install --no-cache-dir -r /tmp/requirements-spark.txt
+RUN pip install --no-cache-dir --no-deps \
+    "depth-anything-3 @ git+https://github.com/ByteDance-Seed/Depth-Anything-3.git@${DA3_COMMIT}"
+
+ENV FORCE_CUDA=1
+ENV MAX_JOBS=8
+ENV TORCH_CUDA_ARCH_LIST=12.0
+
+COPY dependencies/Deformable_DETR /opt/Deformable_DETR
+WORKDIR /opt/Deformable_DETR/models/ops
+RUN pip install --no-cache-dir --no-build-isolation .
+
+WORKDIR /workspace/OmniX
+ENV PYTHONPATH=/workspace/OmniX:/opt/Deformable_DETR

@@ -13,6 +13,7 @@ Checkpoint and output paths are passed as Hydra overrides, e.g.:
         +paths.output_path=/path/to/output
 """
 
+import json
 import os
 from typing import Optional
 from pathlib import Path
@@ -26,7 +27,6 @@ import matplotlib.pyplot as plt
 import moviepy.editor as mpy
 from omegaconf import DictConfig
 from einops import rearrange
-from lightning import LightningModule
 
 import rootutils
 
@@ -75,7 +75,7 @@ def crop_to_resolution(img_pil, target_wh):
     return img_pil
 
 
-def load_images_from_folder(image_folder, target_wh, device="cuda"):
+def load_images_from_folder(image_folder, target_wh, device="cuda", max_images=None):
     """Read & sort images, crop to target, and build per-video image info.
 
     Supports two layouts:
@@ -107,11 +107,15 @@ def load_images_from_folder(image_folder, target_wh, device="cuda"):
             continue
         print(f"  video {video_idx} ({vdir.name}): {len(frame_paths)} frames")
         for local_t, path in enumerate(frame_paths):
+            if max_images is not None and len(images) >= max_images:
+                break
             img_pil = PIL.Image.open(path).convert("RGB")
             img_pil = crop_to_resolution(img_pil, target_wh)
             images.append(np.asarray(img_pil))
             video_idx_list.append(video_idx)
             local_time_idx_list.append(local_t)
+        if max_images is not None and len(images) >= max_images:
+            break
 
     if not images:
         raise FileNotFoundError(f"No images found in {image_folder}")
@@ -179,6 +183,120 @@ def save_images_nhwc(image_array, save_dir, prefix="cam"):
             img = (np.clip(img, 0, 1) * 255.0).astype(np.uint8)
         img_bgr = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
         cv2.imwrite(str(save_path / f"{prefix}_{n:02d}.jpg"), img_bgr)
+
+
+def load_inference_weights(model, checkpoint_path):
+    """Load only the network weights from an OmniX Lightning checkpoint."""
+    print(f"Loading checkpoint: {checkpoint_path}")
+    checkpoint = torch.load(
+        checkpoint_path,
+        map_location="cpu",
+        mmap=True,
+        weights_only=True,
+    )
+    state_dict = checkpoint.get("state_dict", checkpoint)
+    net_state = {
+        key.removeprefix("net."): value
+        for key, value in state_dict.items()
+        if key.startswith("net.")
+    }
+    if not net_state:
+        raise RuntimeError("Checkpoint does not contain any 'net.' weights")
+
+    missing, unexpected = model.load_state_dict(net_state, strict=False, assign=True)
+    if missing or unexpected:
+        details = [
+            f"missing={missing[:20]}{' ...' if len(missing) > 20 else ''}",
+            f"unexpected={unexpected[:20]}{' ...' if len(unexpected) > 20 else ''}",
+        ]
+        raise RuntimeError("Checkpoint does not exactly match the release model: " + "; ".join(details))
+    print(f"Loaded {len(net_state)} network tensors with an exact key match")
+
+
+def summarize_predictions(preds, keys):
+    """Return JSON-serializable numerical checks for important model outputs."""
+    summary = {}
+    for key in keys:
+        if key not in preds:
+            raise KeyError(f"Model output is missing required key: {key}")
+        tensor = preds[key].detach()
+        finite = torch.isfinite(tensor)
+        finite_count = int(finite.sum().item())
+        total = tensor.numel()
+        if finite_count != total:
+            raise RuntimeError(
+                f"Non-finite values in {key}: {total - finite_count} of {total}"
+            )
+        values = tensor.float()
+        summary[key] = {
+            "shape": list(tensor.shape),
+            "dtype": str(tensor.dtype).removeprefix("torch."),
+            "finite_fraction": finite_count / total,
+            "min": float(values.min().item()),
+            "max": float(values.max().item()),
+            "mean": float(values.mean().item()),
+        }
+    summary["cuda_peak_memory_gib"] = torch.cuda.max_memory_allocated() / 1024**3
+    return summary
+
+
+def validate_geometry(preds, image_hw):
+    """Validate camera geometry and report interpretable motion statistics."""
+    image_h, image_w = image_hw
+    poses = preds["camera_pose"].detach().float()
+    rotations = poses[..., :3, :3]
+    identity = torch.eye(3, device=rotations.device)
+    orthogonality_error = (
+        rotations @ rotations.transpose(-1, -2) - identity
+    ).abs().max()
+    determinants = torch.linalg.det(rotations)
+
+    intrinsics = preds["intrinsics"].detach().float()
+    fx = intrinsics[..., 0, 0]
+    fy = intrinsics[..., 1, 1]
+    cx = intrinsics[..., 0, 2]
+    cy = intrinsics[..., 1, 2]
+    dynamic_score = preds["pts3d_dynamic_score"].detach().float()
+
+    if orthogonality_error > 1e-3:
+        raise RuntimeError(
+            f"Camera rotations are not orthonormal: max error {orthogonality_error.item()}"
+        )
+    if determinants.min() < 0.99 or determinants.max() > 1.01:
+        raise RuntimeError("Camera rotation determinants are outside [0.99, 1.01]")
+    if (fx <= 0).any() or (fy <= 0).any():
+        raise RuntimeError("Predicted focal lengths must be positive")
+    if (cx < 0).any() or (cx > image_w).any() or (cy < 0).any() or (cy > image_h).any():
+        raise RuntimeError("Predicted principal points fall outside the image")
+    if dynamic_score.min() < -1e-5 or dynamic_score.max() > 1.00001:
+        raise RuntimeError("Dynamic scores fall outside [0, 1]")
+
+    trajectory = preds["trajectory"].detach().float()
+    temporal_delta = (trajectory[:, :, 1:] - trajectory[:, :, :-1]).norm(dim=-1)
+    if temporal_delta.numel():
+        delta_sample = temporal_delta.flatten()[::32]
+        temporal_stats = {
+            "temporal_delta_mean": float(temporal_delta.mean().item()),
+            "temporal_delta_p95_sampled": float(torch.quantile(delta_sample, 0.95).item()),
+            "temporal_delta_max": float(temporal_delta.max().item()),
+        }
+    else:
+        temporal_stats = {
+            "temporal_delta_mean": 0.0,
+            "temporal_delta_p95_sampled": 0.0,
+            "temporal_delta_max": 0.0,
+        }
+    return {
+        "rotation_orthogonality_max_error": float(orthogonality_error.item()),
+        "rotation_determinant_min": float(determinants.min().item()),
+        "rotation_determinant_max": float(determinants.max().item()),
+        "focal_length_x_min": float(fx.min().item()),
+        "focal_length_x_max": float(fx.max().item()),
+        "focal_length_y_min": float(fy.min().item()),
+        "focal_length_y_max": float(fy.max().item()),
+        "dynamic_fraction_above_0_5": float((dynamic_score > 0.5).float().mean().item()),
+        **temporal_stats,
+    }
 
 
 # ==========================================
@@ -370,62 +488,92 @@ def visualize_3d_trajectories(
 # ==========================================
 
 def run(cfg: DictConfig):
-    torch.set_float32_matmul_precision("medium")
+    torch.backends.cuda.matmul.fp32_precision = "tf32"
+    torch.backends.cudnn.conv.fp32_precision = "tf32"
 
     image_folder = cfg.paths.image_folder
     checkpoint_path = cfg.paths.checkpoint_path
     output_path = cfg.paths.output_path
     target_h = cfg.paths.get("target_h", 280)
     target_w = cfg.paths.get("target_w", 504)
+    max_images = cfg.paths.get("max_images", None)
+    skip_render = cfg.paths.get("skip_render", False)
+    render_scale = int(cfg.paths.get("render_scale", 4))
+    orbit_frames = int(cfg.paths.get("orbit_frames", 30))
+    save_raw_predictions = cfg.paths.get("save_raw_predictions", True)
     os.makedirs(output_path, exist_ok=True)
 
     # Instantiate & load model
-    print(f"Instantiating model <{cfg.model._target_}>")
-    model: LightningModule = hydra.utils.instantiate(cfg.model)
-    model.pretrained = checkpoint_path
-    model._load_pretrained_weights()
+    print(f"Instantiating inference network <{cfg.model.net._target_}>")
+    model = hydra.utils.instantiate(cfg.model.net)
+    load_inference_weights(model, checkpoint_path)
     model = model.to("cuda").eval()
+    torch.cuda.reset_peak_memory_stats()
 
     # Load & crop images
-    images, image_info = load_images_from_folder(image_folder, (target_w, target_h))
+    images, image_info = load_images_from_folder(
+        image_folder,
+        (target_w, target_h),
+        max_images=max_images,
+    )
     batch = {"image": images.unsqueeze(0), "image_info": image_info.unsqueeze(0)}
 
-    with torch.no_grad():
+    with torch.inference_mode():
         preds = model(batch)
 
-    trajectory = preds["trajectory"][0].cpu().numpy()
-    c2w = ensure_4x4(preds["camera_pose"][0].cpu().numpy())
-    intrinsic = preds["intrinsics"][0].cpu().numpy()
+    required_keys = ["trajectory", "camera_pose", "intrinsics", "pts3d_dynamic_score"]
+    summary = summarize_predictions(preds, required_keys)
+    summary["geometry_checks"] = validate_geometry(preds, (target_h, target_w))
+    summary["input_images"] = int(images.shape[0])
+    summary_path = Path(output_path) / "prediction_summary.json"
+    summary_path.write_text(json.dumps(summary, indent=2) + "\n")
+    print(f"Numerical validation passed; wrote {summary_path}")
+
+    if save_raw_predictions:
+        raw_path = Path(output_path) / "predictions.pt"
+        torch.save(
+            {key: preds[key][0].detach().float().cpu() for key in required_keys},
+            raw_path,
+        )
+        print(f"Saved raw predictions to {raw_path}")
+
+    trajectory = preds["trajectory"][0].float().cpu().numpy()
+    c2w = ensure_4x4(preds["camera_pose"][0].float().cpu().numpy())
+    intrinsic = preds["intrinsics"][0].float().cpu().numpy()
 
     images_gt = batch["image"][0].cpu().numpy()
     images_hwc = rearrange(images_gt, "im c h w -> im h w c")
     im, img_h, img_w = images_hwc.shape[:3]
 
     c2w = move_cameras_backwards(c2w, distance=0.16, lift_height=0.1, tilt_down_deg=-6)
-    foreground_masks = preds["pts3d_dynamic_score"][0].cpu().numpy()
+    foreground_masks = preds["pts3d_dynamic_score"][0].float().cpu().numpy()
     num_points_to_show = max(1, int(((foreground_masks > 0.5).sum() // im) * 0.03))
 
-    print(f"Saving visualization to {output_path}")
-    visualize_3d_trajectories(
-        trajectories=trajectory,
-        intrinsics=intrinsic,
-        c2ws=c2w,
-        foreground_masks=foreground_masks,
-        image_array=images_hwc,
-        confidence_maps=None,
-        save_dir=output_path,
-        num_points_to_show=num_points_to_show,
-        traj_length=im,
-        traj_alpha=1.0,
-        traj_width=3,
-        img_h=img_h * 4,
-        img_w=img_w * 4,
-        fps=15,
-        show_dense_point_cloud=True,
-        project_all_views=False,
-        point_size=6,
-        orbit_radius=0.1,
-    )
+    if not skip_render:
+        print(f"Saving visualization to {output_path}")
+        visualize_3d_trajectories(
+            trajectories=trajectory,
+            intrinsics=intrinsic,
+            c2ws=c2w,
+            foreground_masks=foreground_masks,
+            image_array=images_hwc,
+            confidence_maps=None,
+            save_dir=output_path,
+            num_points_to_show=num_points_to_show,
+            traj_length=im,
+            traj_alpha=1.0,
+            traj_width=3,
+            img_h=img_h * render_scale,
+            img_w=img_w * render_scale,
+            fps=15,
+            show_dense_point_cloud=True,
+            project_all_views=False,
+            point_size=max(1, round(1.5 * render_scale)),
+            orbit_frames=orbit_frames,
+            orbit_radius=0.1,
+        )
+    else:
+        print("Skipping video rendering (paths.skip_render=true)")
 
     save_images_nhwc(images_hwc, os.path.join(output_path, "gt_images"))
 

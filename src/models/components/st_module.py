@@ -19,8 +19,6 @@ from depth_anything_3.model.dinov2.layers.rope import RotaryPositionEmbedding2D,
 
 from depth_anything_3.utils.geometry import affine_inverse, as_homogeneous
 
-from flash_attn_interface import flash_attn_func as flash_attn_fuc_v3
-
 from torch.utils.checkpoint import checkpoint
 
 
@@ -66,36 +64,22 @@ class AttentionMask(nn.Module):
         if attn_mask is not None:
             attn_mask = attn_mask.unsqueeze(1)  # [B, 1, K, K] → 自动广播到 H
 
-        if attn_mask is None and q.dtype == torch.bfloat16 or q.dtype == torch.float16:
-            if q.is_contiguous():
-                q = q.transpose(1, 2)
-            else:
-                q = q.transpose(1, 2).contiguous()
-            
-            if k.is_contiguous():
-                k = k.transpose(1, 2)
-            else:
-                k = k.transpose(1, 2).contiguous()
-            
-            if v.is_contiguous():
-                v = v.transpose(1, 2)
-            else:
-                v = v.transpose(1, 2).contiguous()
-            
-            x = flash_attn_fuc_v3(q, k, v)
-            if x.is_contiguous():
-                x = x.transpose(1, 2)
-            else:
-                x = x.transpose(1, 2).contiguous()
+        if self.fused_attn:
+            x = F.scaled_dot_product_attention(
+                q,
+                k,
+                v,
+                attn_mask=attn_mask,
+                dropout_p=self.attn_drop.p if self.training else 0.0,
+            )
         else:
-            if self.fused_attn:
-                x = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask, dropout_p=self.attn_drop.p if self.training else 0.0)
-            else:
-                q = q * self.scale
-                attn = q @ k.transpose(-2, -1)
-                attn = attn.softmax(dim=-1)
-                attn = self.attn_drop(attn)
-                x = attn @ v
+            q = q * self.scale
+            attn = q @ k.transpose(-2, -1)
+            if attn_mask is not None:
+                attn = attn + attn_mask
+            attn = attn.softmax(dim=-1)
+            attn = self.attn_drop(attn)
+            x = attn @ v
 
         x = x.transpose(1, 2).reshape(B, N, C)
         x = self.proj(x)
@@ -168,43 +152,26 @@ class CrossAttentionMask(nn.Module):
             elif attn_mask.dim() == 3: # [B, N, M] -> [B, 1, N, M]
                 attn_mask = attn_mask.unsqueeze(1)
 
-        if attn_mask is None and q.dtype == torch.bfloat16 or q.dtype == torch.float16:
-            if q.is_contiguous():
-                q = q.transpose(1, 2)
-            else:
-                q = q.transpose(1, 2).contiguous()
-            
-            if k.is_contiguous():
-                k = k.transpose(1, 2)
-            else:
-                k = k.transpose(1, 2).contiguous()
-            
-            if v.is_contiguous():
-                v = v.transpose(1, 2)
-            else:
-                v = v.transpose(1, 2).contiguous()
-            
-            x = flash_attn_fuc_v3(q, k, v)
-            if x.is_contiguous():
-                x = x.transpose(1, 2)
-            else:
-                x = x.transpose(1, 2).contiguous()
+        if self.fused_attn:
+            x = F.scaled_dot_product_attention(
+                q,
+                k,
+                v,
+                attn_mask=attn_mask,
+                dropout_p=self.attn_drop.p if self.training else 0.0,
+            )
         else:
-            if self.fused_attn:
-                # F.scaled_dot_product_attention 自动处理维度匹配
-                x = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask, dropout_p=self.attn_drop.p if self.training else 0.0)
-            else:
-                q = q * self.scale
-                # [B, H, N, D] @ [B, H, D, M] -> [B, H, N, M]
-                attn = q @ k.transpose(-2, -1)
-                
-                if attn_mask is not None:
-                    attn = attn + attn_mask
+            q = q * self.scale
+            # [B, H, N, D] @ [B, H, D, M] -> [B, H, N, M]
+            attn = q @ k.transpose(-2, -1)
 
-                attn = attn.softmax(dim=-1)
-                attn = self.attn_drop(attn)
-                # [B, H, N, M] @ [B, H, M, D] -> [B, H, N, D]
-                x = attn @ v
+            if attn_mask is not None:
+                attn = attn + attn_mask
+
+            attn = attn.softmax(dim=-1)
+            attn = self.attn_drop(attn)
+            # [B, H, N, M] @ [B, H, M, D] -> [B, H, N, D]
+            x = attn @ v
 
         x = x.transpose(1, 2).reshape(B, N, C)
         x = self.proj(x)
