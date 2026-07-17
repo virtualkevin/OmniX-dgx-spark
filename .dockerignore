@@ -1,5 +1,9 @@
 .git
 .gitignore
+.env
+.env.*
+**/*.pem
+**/*.key
 outputs
 wandb
 lightning_logs

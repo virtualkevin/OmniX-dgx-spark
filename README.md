@@ -24,7 +24,7 @@ The container is reproducibly pinned to:
 ### Prerequisites
 
 - DGX Spark with Docker and NVIDIA Container Toolkit configured
-- approximately 20 GiB free for the 9.1 GiB image, 4.9 GiB checkpoint, and outputs
+- approximately 20 GiB free for the 9.1 GiB image, 4.9 GiB checkpoint, and the bundled example outputs; long-video batches need additional space described below
 - internet access while building the image and downloading the checkpoint
 
 Confirm that Docker can see the GB10:
@@ -98,6 +98,137 @@ The full 16-image example was run successfully on a DGX Spark GB10. The checkpoi
 | Peak allocated CUDA memory | `12.46 GiB` |
 
 Representative renders were also inspected: the street geometry is coherent, the deer silhouette is recognizable, and colored motion tracks follow the deer through the temporal and orbit frames rather than producing blank, exploded, or non-finite output.
+
+### Long-video batch inference
+
+The creators train and evaluate with 16 frames at the native `504x280` model
+resolution, and report that OmniX generalizes to 32 or more frames at inference
+time. This fork validated 32-frame inference on the GB10, where it peaks at
+29.69 GiB of allocated CUDA memory. For the dance footage below, 8 sampled
+frames per second gave a useful four-second window per non-overlapping chunk.
+A raw float32 PT shard is approximately 1.63 GiB; budget about 292.1 GiB for
+179 shards before retaining videos, sampled frames, renders, or web assets.
+
+Copy and edit the tracked example specification. Source videos and every
+generated artifact stay under `outputs/`, which Git ignores:
+
+```bash
+cp configs/video_batch.example.json outputs/video_batch.json
+# Edit source paths, IDs, output_root, and any source crop filter.
+
+python3 scripts/prepare_video_batch.py \
+  --spec outputs/video_batch.json
+
+./scripts/run_spark_batch_inference.sh \
+  outputs/video_batch_8fps_32f/batch_plan.json
+```
+
+Preparation uses FFmpeg from the pinned OmniX container, samples each source
+once, and hard-links sampled JPEGs into non-overlapping 32-frame directories.
+The final partial sequence repeats its last real frame to preserve a fixed
+model shape; `valid_frames` and `pad_frames` in the manifest identify the
+padding. The batch process verifies the source bytes and prepared chunk inputs,
+loads the checkpoint once, runs chunks sequentially, and writes each PT
+atomically. Re-running the same command verifies those inputs plus the recorded
+crop, checkpoint, container, tensor shapes, fingerprint, and PT checksum before
+skipping a completed shard.
+
+Every filename remains meaningful when copied out of its directory, for
+example:
+
+```text
+video_a__fps8__chunk-0000__t-000000000-000004000ms__valid32-pad00.pt
+```
+
+Verify all summaries, geometry checks, fingerprints, sizes, and hashes after a
+batch finishes:
+
+```bash
+./scripts/run_spark_batch_verify.sh \
+  outputs/video_batch_8fps_32f/batch_plan.json \
+  --rehash
+```
+
+The DGX Spark acceptance batch used these three complete sources:
+
+| Video | Sampled frames | PT shards | Final shard | Preprocessing |
+| --- | ---: | ---: | --- | --- |
+| TWICE “TT” | 2,028 | 64 | 12 valid + 20 padded | none |
+| TWICE “Heart Shaker” | 1,532 | 48 | 28 valid + 4 padded | none |
+| LOVE ATTACK 180 | 2,119 | 67 | 7 valid + 25 padded | left-eye crop: `crop=iw/2:ih/2:0:ih/4` |
+| **Total** | **5,679** | **179** | **49 padded frames** | |
+
+All 179 shards passed an aggregate acceptance run with fresh SHA-256
+recomputation, exact raw tensor shape/dtype checks, complete finite-value scans,
+camera-geometry checks, and contiguous non-overlap validation. The PTs occupy
+313,635,259,997 bytes (292.10 GiB). Inference averaged 14.55 seconds per shard,
+43.40 minutes total excluding model load and verification, and peaked at
+29.69 GiB of allocated CUDA memory. Representative TT, Heart Shaker, and LOVE
+ATTACK renders retained coherent backgrounds, recognizable dancers, temporal
+motion tracks, and stable orbit views.
+
+The manifest and per-chunk `status.json` files make the workflow resumable.
+Use a new `output_root` when intentionally changing sampling or model settings;
+fingerprint checks prevent old results from being silently accepted.
+
+### Browser timeline package
+
+Raw PTs are deliberately preserved, but a browser should not download a
+1.63 GiB tensor for each four-second chunk. Create a complete web package with:
+
+```bash
+./scripts/run_spark_web_pack.sh \
+  outputs/video_batch_8fps_32f/batch_plan.json \
+  --strict
+```
+
+For each chunk, the packer chooses one middle reference cloud and a deterministic
+mixture of 8,192 raster-distributed and high-dynamic-score points. It writes:
+
+- positions as little-endian float32 `[time, point, xyz]`
+- pixel indices, RGB colors, and quantized dynamic scores
+- per-frame camera-to-world matrices and intrinsics
+- SHA-256 and shape/axis metadata for every binary
+
+The accepted three-video package contains 1,074 binary files totaling
+575,297,408 bytes (548.65 MiB), plus its manifest. The browser loader
+checksum-validated real first, middle, and final shards for all three videos,
+including exact four-second boundaries and the short unsampled source tail.
+
+The position stream is 3,145,728 bytes per 32-frame chunk, over 500 times
+smaller than its raw PT. The complete package is written to
+`<output_root>/web/manifest.json`; filtered or incomplete packing runs write
+`manifest.partial.json` and never replace the canonical timeline. Serve the
+directory over HTTP(S), rather than opening it with `file://`, so browser fetch
+and Web Crypto checksum verification are available.
+
+[examples/omnix_timeline_loader.js](examples/omnix_timeline_loader.js) provides
+a dependency-free browser loader with validation, checksum checking, gap-safe
+timeline lookup, and a small lazy cache:
+
+```js
+import { openOmniXTimeline } from "./omnix_timeline_loader.js";
+
+const timeline = await openOmniXTimeline("/omnix/manifest.json");
+const location = timeline.locate("video_a", 42.3);
+const chunk = await timeline.loadChunk(location.videoId, location.chunkId);
+const xyz = chunk.framePositions(location.frameIndex);
+```
+
+The PTs cannot be physically concatenated as one continuous 4D world. Each
+independent inference chunk has its own normalized scale and coordinate gauge,
+and its reference pixels are different point identities. The web manifest is a
+logical timeline: prefetch the next shard, render one chunk at a time, and reset
+the scene or crossfade rendered images in screen space at its boundary. Do not
+interpolate unaligned point clouds. A future continuous-world stitch should
+estimate a robust boundary similarity transform from static-background 2D
+matches and their predicted 3D points, and start a new segment at hard cuts or
+weak matches.
+
+OmniX matrices use an OpenCV camera basis (`+x` right, `+y` down, `+z`
+forward). For Three.js/WebGL, with `C = diag(1, -1, -1, 1)`, transform points as
+`p_three = C * p_opencv` and homogeneous camera-to-world matrices as
+`c2w_three = C * c2w_opencv * C`. The web manifest records this convention.
 
 ### Troubleshooting
 

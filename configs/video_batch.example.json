@@ -1,0 +1,19 @@
+{
+  "schema": "omnix.video-batch-spec.v1",
+  "sampling_fps": 8,
+  "frames_per_chunk": 32,
+  "output_root": "outputs/video_batch_8fps_32f",
+  "docker_image": "omnix-dgx-spark:latest",
+  "checkpoint": "pretrained_weight/eccv_release.ckpt",
+  "videos": [
+    {
+      "id": "video_a",
+      "source": "outputs/video_inputs/video_a.mp4"
+    },
+    {
+      "id": "video_180_left_eye",
+      "source": "outputs/video_inputs/video_180.mp4",
+      "crop_filter": "crop=iw/2:ih/2:0:ih/4"
+    }
+  ]
+}
