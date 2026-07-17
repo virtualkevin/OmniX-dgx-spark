@@ -1,0 +1,68 @@
+services:
+  api:
+    build:
+      context: ..
+      dockerfile: viewer/server/Dockerfile
+    environment:
+      OMX_TEMP_DIRECTORY: /tmp/omnix-viewer
+      OMX_MAX_UPLOAD_BYTES: "1073741824"
+      OMX_MAX_ARCHIVE_BYTES: "8589934592"
+      OMX_MAX_TENSOR_BYTES: "8589934592"
+      OMX_MAX_OUTPUT_BYTES: "2147483648"
+      OMX_MAX_SOURCE_VIEWS: "64"
+      OMX_MAX_FRAMES: "600"
+      OMX_MAX_SOURCE_PIXELS: "16000000"
+      OMX_MAX_POINT_BUDGET: "200000"
+      OMX_CONVERSION_TIMEOUT: "300"
+    expose:
+      - "8000"
+    init: true
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 256
+    cpus: 4.0
+    mem_limit: 12g
+    ulimits:
+      core: 0
+      fsize: 3221225472
+      nofile:
+        soft: 1024
+        hard: 1024
+    tmpfs:
+      - /tmp/omnix-viewer:rw,noexec,nosuid,nodev,size=4g,uid=10001,gid=10001,mode=0700
+    networks:
+      - viewer-internal
+    stop_grace_period: 10s
+
+  web:
+    build:
+      context: ..
+      dockerfile: viewer/Dockerfile
+      target: production
+    depends_on:
+      api:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:4173:8080"
+    init: true
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 128
+    mem_limit: 256m
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=64m,uid=101,gid=101,mode=0700
+    networks:
+      - viewer-edge
+      - viewer-internal
+    stop_grace_period: 5s
+
+networks:
+  viewer-edge:
+  viewer-internal:
+    internal: true
