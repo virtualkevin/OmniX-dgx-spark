@@ -1,4 +1,5 @@
 import { PtParseError, type PtParseErrorCode } from './types'
+import { MAX_BROWSER_DATASET_FILE_BYTES } from '../limits'
 
 export { PtParseError } from './types'
 
@@ -10,7 +11,6 @@ const LOCAL_HEADER_SIGNATURE = 0x04034b50
 
 const EOCD_BYTES = 22
 const MAX_EOCD_SEARCH_BYTES = EOCD_BYTES + 0xffff
-const MAX_FILE_BYTES = 1024 * 1024 * 1024
 const MAX_CENTRAL_DIRECTORY_BYTES = 16 * 1024 * 1024
 const MAX_ENTRY_COUNT = 512
 const DEFAULT_READ_LIMIT = 64 * 1024 * 1024
@@ -530,8 +530,8 @@ export async function openTorchZip(file: Blob): Promise<TorchZipArchive> {
   if (!Number.isSafeInteger(file.size) || file.size < EOCD_BYTES) {
     fail('INVALID_ZIP', 'The file is empty or too small to be a torch.save archive.')
   }
-  if (file.size > MAX_FILE_BYTES) {
-    fail('RESOURCE_LIMIT', 'The selected .pt file exceeds the 1 GiB browser limit.')
+  if (file.size > MAX_BROWSER_DATASET_FILE_BYTES) {
+    fail('RESOURCE_LIMIT', 'The selected .pt file exceeds the 2 GiB browser limit.')
   }
 
   const eocd = await readEocd(file)
@@ -553,7 +553,11 @@ export async function openTorchZip(file: Blob): Promise<TorchZipArchive> {
     prefix,
     entries,
     async readEntry(relativeOrFullName, maxBytes = DEFAULT_READ_LIMIT) {
-      if (!Number.isSafeInteger(maxBytes) || maxBytes <= 0 || maxBytes > MAX_FILE_BYTES) {
+      if (
+        !Number.isSafeInteger(maxBytes) ||
+        maxBytes <= 0 ||
+        maxBytes > MAX_BROWSER_DATASET_FILE_BYTES
+      ) {
         fail('INVALID_ENTRY_RANGE', 'The requested entry size limit is invalid.')
       }
       const entry = resolveEntry(entries, prefix, relativeOrFullName)

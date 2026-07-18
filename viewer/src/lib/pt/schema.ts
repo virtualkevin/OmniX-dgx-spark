@@ -1,11 +1,12 @@
 import type { TensorDescriptor } from './types'
+import { MAX_BROWSER_TENSOR_BYTES } from '../limits'
 
 const FLOAT32_BYTES = Float32Array.BYTES_PER_ELEMENT
 
 export const OMX_MAX_SOURCE_VIEWS = 64
 export const OMX_MAX_FRAMES = 600
 export const OMX_MAX_SOURCE_PIXELS = 16_000_000
-export const OMX_MAX_TENSOR_BYTES = 1024 * 1024 * 1024
+export const OMX_MAX_TENSOR_BYTES = MAX_BROWSER_TENSOR_BYTES
 
 const REQUIRED_KEYS = [
   'trajectory',

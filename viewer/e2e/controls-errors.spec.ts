@@ -59,3 +59,24 @@ test('shows a sanitized error and keeps the current scene after a malformed uplo
   await expect(page.getByText('100,000 pts')).toBeVisible()
   expect(errors).toEqual([])
 })
+
+test('reports a format-specific error for malformed OMX4D and keeps the scene', async ({ page }) => {
+  const errors: string[] = []
+  page.on('pageerror', (error) => errors.push(error.message))
+
+  await page.goto('/')
+  await expect(page.getByText('100,000 pts')).toBeVisible()
+
+  await page.locator('input[type="file"][accept*=".omx4d"]').setInputFiles({
+    name: 'malformed.omx4d',
+    mimeType: 'application/octet-stream',
+    buffer: Buffer.from('bad OMX4D'),
+  })
+
+  const alert = page.getByRole('alert')
+  await expect(alert).toContainText('The OMX4D renderer payload is invalid')
+  await expect(alert).toContainText('OMX4D payload must contain at least 16 bytes.')
+  await alert.getByRole('button', { name: 'Keep current scene' }).click()
+  await expect(page.getByText('100,000 pts')).toBeVisible()
+  expect(errors).toEqual([])
+})

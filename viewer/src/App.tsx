@@ -37,6 +37,10 @@ import { ViewerScene } from './components/Scene'
 import type { ColorMode, RenderSettings, ViewerDataset } from './lib/dataset'
 import { DecoderClient } from './lib/decoder-client'
 import {
+  MAX_BROWSER_DATASET_FILE_BYTES,
+  MAX_BROWSER_POINT_BUDGET,
+} from './lib/limits'
+import {
   PLAYBACK_RATES,
   durationSeconds,
   formatTime,
@@ -78,7 +82,14 @@ const defaultSettings: RenderSettings = {
   cameraFrusta: false,
 }
 
-const MAX_PT_FILE_BYTES = 1024 ** 3
+type DatasetFileKind = 'pt' | 'omx4d'
+
+function datasetFileKind(file: File): DatasetFileKind | null {
+  const name = file.name.toLowerCase()
+  if (name.endsWith('.pt')) return 'pt'
+  if (name.endsWith('.omx4d')) return 'omx4d'
+  return null
+}
 
 function supportsWebGl(): boolean {
   try {
@@ -154,23 +165,45 @@ export default function App() {
   const webGlAvailable = useMemo(supportsWebGl, [])
   const reducedPerformance = useMemo(() => navigator.hardwareConcurrency > 0 && navigator.hardwareConcurrency <= 4, [])
 
-  const loadSample = useCallback(async (client: DecoderClient, signal?: AbortSignal) => {
+  const syncOffsetRef = useRef(syncOffset)
+  syncOffsetRef.current = syncOffset
+
+  const invalidateActiveLoad = useCallback(() => {
+    const active = conversionRef.current
+    conversionRef.current = null
+    active?.abort()
+  }, [])
+
+  const resetAttachedMedia = useCallback(() => {
+    const element = mediaRef.current
+    if (!element) return
+    const target = Math.max(0, syncOffsetRef.current)
+    const upperBound = Number.isFinite(element.duration) ? element.duration : target
+    element.currentTime = Math.min(upperBound, target)
+  }, [])
+
+  const loadSample = useCallback(async (client: DecoderClient) => {
+    invalidateActiveLoad()
+    const controller = new AbortController()
+    conversionRef.current = controller
     setLoadState({ phase: 'sample' })
+
     try {
-      const response = await fetch('/sample/deer.omx4d', { signal })
+      const response = await fetch('/sample/deer.omx4d', { signal: controller.signal })
       if (!response.ok) throw new Error(`The baked sample returned HTTP ${response.status}.`)
       const buffer = await response.arrayBuffer()
-      if (signal?.aborted) return
-      const nextDataset = await client.decode(buffer)
-      if (signal?.aborted) return
+      if (controller.signal.aborted || conversionRef.current !== controller) return
+      const nextDataset = await client.decode(buffer, { signal: controller.signal })
+      if (controller.signal.aborted || conversionRef.current !== controller) return
       setDataset(nextDataset)
       setDatasetName(nextDataset.manifest.name || 'Deer · baked sample')
       setSettings((current) => ({ ...current, selectedView: -1, dynamicThreshold: 0 }))
       dispatch({ type: 'load', frameCount: nextDataset.manifest.frameCount, fps: nextDataset.manifest.fps || 15 })
+      resetAttachedMedia()
       setSeekToken((token) => token + 1)
       setLoadState({ phase: 'ready' })
     } catch (error) {
-      if (signal?.aborted) return
+      if (controller.signal.aborted || conversionRef.current !== controller) return
       setLoadState({
         phase: 'error',
         error: {
@@ -178,21 +211,21 @@ export default function App() {
           detail: error instanceof Error ? error.message : 'Check the static viewer files and try again.',
         },
       })
+    } finally {
+      if (conversionRef.current === controller) conversionRef.current = null
     }
-  }, [])
+  }, [invalidateActiveLoad, resetAttachedMedia])
 
   useEffect(() => {
     const client = new DecoderClient()
-    const abort = new AbortController()
     decoderRef.current = client
-    void loadSample(client, abort.signal)
+    void loadSample(client)
     return () => {
-      abort.abort()
-      conversionRef.current?.abort()
+      invalidateActiveLoad()
       client.dispose()
-      decoderRef.current = null
+      if (decoderRef.current === client) decoderRef.current = null
     }
-  }, [loadSample])
+  }, [invalidateActiveLoad, loadSample])
 
   useEffect(() => {
     const element = mediaRef.current
@@ -243,81 +276,98 @@ export default function App() {
     }
   }, [dataset, player.frame, player.frameCount, player.loop, player.playing, player.rate, seek])
 
-  const uploadPt = useCallback(async (file: File) => {
+  const openDatasetFile = useCallback(async (file: File) => {
     const client = decoderRef.current
     if (!client) return
-    if (!file.name.toLowerCase().endsWith('.pt')) {
+    invalidateActiveLoad()
+    const kind = datasetFileKind(file)
+    if (!kind) {
       setLoadState({ phase: 'error', error: {
-        title: 'Choose an OmniX .pt file',
-        detail: 'The browser accepts the exact plain-tensor predictions.pt schema produced by OmniX.',
+        title: 'Choose an OmniX .pt or .omx4d file',
+        detail: 'Open a raw OmniX prediction archive or a baked OMX4D renderer payload.',
       } })
       return
     }
-    if (file.size > MAX_PT_FILE_BYTES) {
+    if (file.size > MAX_BROWSER_DATASET_FILE_BYTES) {
       setLoadState({ phase: 'error', error: {
         title: 'The selected file is too large',
-        detail: 'The browser-only reader accepts files up to 1 GiB.',
+        detail: 'The browser-only reader accepts .pt and .omx4d files up to 2 GiB.',
       } })
       return
     }
 
-    conversionRef.current?.abort()
     const controller = new AbortController()
     conversionRef.current = controller
     dispatch({ type: 'setPlaying', playing: false })
     mediaRef.current?.pause()
-    setLoadState({
-      phase: 'processing',
-      progress: 0,
-      status: 'Opening the archive in your browser',
-    })
+    setLoadState(kind === 'pt'
+      ? {
+        phase: 'processing',
+        progress: 0,
+        status: 'Opening the archive in your browser',
+      }
+      : {
+        phase: 'processing',
+        status: 'Reading and validating the OMX4D payload off the main thread',
+      })
 
     try {
-      const nextDataset = await client.decodePt(
-        file,
-        { pointBudget, fps: player.fps, name: file.name },
-        {
-          signal: controller.signal,
-          onProgress: (progress) => {
-            if (controller.signal.aborted) return
-            setLoadState({
-              phase: 'processing',
-              progress: Math.max(0, Math.min(1, progress.progress)),
-              status: progress.message,
-            })
+      const nextDataset = kind === 'pt'
+        ? await client.decodePt(
+          file,
+          { pointBudget, fps: player.fps, name: file.name },
+          {
+            signal: controller.signal,
+            onProgress: (progress) => {
+              if (controller.signal.aborted || conversionRef.current !== controller) return
+              setLoadState({
+                phase: 'processing',
+                progress: Math.max(0, Math.min(1, progress.progress)),
+                status: progress.message,
+              })
+            },
           },
-        },
-      )
-      if (controller.signal.aborted) return
+        )
+        : await client.decodeOmx4dFile(file, { signal: controller.signal })
+      if (controller.signal.aborted || conversionRef.current !== controller) return
       setDataset(nextDataset)
       setDatasetName(file.name)
       setSettings((current) => ({ ...current, selectedView: -1, dynamicThreshold: 0 }))
       dispatch({ type: 'load', frameCount: nextDataset.manifest.frameCount, fps: nextDataset.manifest.fps || player.fps })
+      resetAttachedMedia()
       setSeekToken((token) => token + 1)
       setResetToken((token) => token + 1)
       setLoadState({ phase: 'ready' })
     } catch (error) {
       if (error instanceof DOMException && error.name === 'AbortError') {
-        setLoadState(dataset ? { phase: 'ready' } : { phase: 'sample' })
+        if (conversionRef.current === controller) {
+          if (dataset) setLoadState({ phase: 'ready' })
+          else void loadSample(client)
+        }
         return
       }
+      if (conversionRef.current !== controller) return
       const detail = error instanceof Error && error.message.length <= 400
         ? error.message
-        : 'The browser rejected this archive before allocating renderer data.'
+        : kind === 'pt'
+          ? 'The browser rejected this archive before allocating renderer data.'
+          : 'The browser rejected this renderer payload before opening the scene.'
       setLoadState({
         phase: 'error',
         error: {
-          title: 'The tensors do not match the OmniX schema',
+          title: kind === 'pt'
+            ? 'The tensors do not match the OmniX schema'
+            : 'The OMX4D renderer payload is invalid',
           detail,
         },
       })
     } finally {
       if (conversionRef.current === controller) conversionRef.current = null
     }
-  }, [dataset, player.fps, pointBudget])
+  }, [dataset, invalidateActiveLoad, loadSample, player.fps, pointBudget, resetAttachedMedia])
   const handleDatasetFile = (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0]
-    if (file) void uploadPt(file)
+    if (file) void openDatasetFile(file)
     event.target.value = ''
   }
 
@@ -344,11 +394,16 @@ export default function App() {
   const onDrop = (event: DragEvent<HTMLDivElement>) => {
     event.preventDefault()
     setDragActive(false)
-    const file = Array.from(event.dataTransfer.files).find((candidate) => candidate.name.toLowerCase().endsWith('.pt'))
-    if (file) void uploadPt(file)
-    else setLoadState({ phase: 'error', error: {
-      title: 'No .pt file found',
-      detail: 'Drop an OmniX predictions.pt file anywhere in the viewer.',
+    if (loadState.phase === 'processing') return
+    const file = Array.from(event.dataTransfer.files).find((candidate) => datasetFileKind(candidate) !== null)
+    if (file) {
+      void openDatasetFile(file)
+      return
+    }
+    invalidateActiveLoad()
+    setLoadState({ phase: 'error', error: {
+      title: 'No .pt or .omx4d file found',
+      detail: 'Drop an OmniX prediction archive or baked renderer payload anywhere in the viewer.',
     } })
   }
 
@@ -411,15 +466,16 @@ export default function App() {
 
         <div className="topbar__actions">
           <label className="quality-select">
-            <span>Import quality</span>
+            <span>PT import quality</span>
             <select value={pointBudget} onChange={(event) => setPointBudget(Number(event.target.value))} disabled={busy}>
               <option value={50_000}>50k · light</option>
               <option value={100_000}>100k · balanced</option>
               <option value={200_000}>200k · fine</option>
+              <option value={MAX_BROWSER_POINT_BUDGET}>500k · max</option>
             </select>
           </label>
           <button type="button" className="button button--primary" onClick={() => fileInputRef.current?.click()} disabled={busy}>
-            <Upload size={16} /> Open .pt
+            <Upload size={16} /> Open .pt / .omx4d
           </button>
           <IconButton label="Toggle diagnostics" active={diagnosticsOpen} onClick={() => setDiagnosticsOpen((open) => !open)}>
             <PanelRight size={18} />
@@ -427,7 +483,7 @@ export default function App() {
         </div>
       </header>
 
-      <input ref={fileInputRef} type="file" accept=".pt,application/octet-stream" hidden onChange={handleDatasetFile} />
+      <input ref={fileInputRef} type="file" accept=".pt,.omx4d,application/octet-stream" hidden onChange={handleDatasetFile} />
       <input ref={mediaInputRef} type="file" accept="video/*,audio/*" hidden onChange={handleMediaFile} />
 
       <section className="workspace" aria-label="3D point cloud viewport">
@@ -468,7 +524,7 @@ export default function App() {
             <div className="state-card__actions">
               {dataset && <button type="button" className="button" onClick={() => setLoadState({ phase: 'ready' })}>Keep current scene</button>}
               {!dataset && <button type="button" className="button" onClick={() => decoderRef.current && void loadSample(decoderRef.current)}>Retry sample</button>}
-              <button type="button" className="button button--primary" onClick={() => fileInputRef.current?.click()}>Choose another .pt</button>
+              <button type="button" className="button button--primary" onClick={() => fileInputRef.current?.click()}>Choose another file</button>
             </div>
           </div>
         )}
@@ -477,7 +533,7 @@ export default function App() {
           <div className="conversion-card" role="status" aria-live="polite">
             <div className="conversion-card__icon"><LoaderCircle className="spinner" /></div>
             <div className="conversion-card__copy">
-              <strong>{loadState.status ?? 'Reading the PyTorch archive locally'}</strong>
+              <strong>{loadState.status ?? 'Reading the selected dataset locally'}</strong>
               <span>
                 {loadState.progress !== undefined
                   ? `${Math.round(loadState.progress * 100)}% complete · no file data leaves this browser`
@@ -492,7 +548,7 @@ export default function App() {
         )}
         {dragActive && (
           <div className="drop-overlay">
-            <div><FileUp size={30} /><strong>Drop predictions.pt</strong><span>Validate and open in this scene</span></div>
+            <div><FileUp size={30} /><strong>Drop .pt or .omx4d</strong><span>Validate and open in this scene</span></div>
           </div>
         )}
 
@@ -615,7 +671,7 @@ export default function App() {
               {warnings.map((warning) => <p key={warning}><AlertTriangle size={13} />{warning}</p>)}
             </div>
           )}
-          <p className="privacy-note">The worker reads a restricted, non-executing subset of the PyTorch archive format. The selected .pt file never leaves this browser.</p>
+          <p className="privacy-note">The worker validates OMX4D payloads and reads a restricted, non-executing subset of the PyTorch archive format. Selected dataset files never leave this browser.</p>
         </aside>
       )}
 

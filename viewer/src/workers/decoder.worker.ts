@@ -1,6 +1,7 @@
 /// <reference lib="webworker" />
 
 import { parseOmx4d } from '../lib/omx4d'
+import { MAX_BROWSER_DATASET_FILE_BYTES } from '../lib/limits'
 import { convertOmnixPt } from '../lib/pt/convert'
 import type { ViewerDataset } from '../lib/dataset'
 import type { PtDecodeOptions, PtDecodeProgress } from '../lib/decoder-client'
@@ -9,6 +10,12 @@ interface DecodeOmx4dRequest {
   id: number
   kind: 'decodeOmx4d'
   buffer: ArrayBuffer
+}
+
+interface DecodeOmx4dFileRequest {
+  id: number
+  kind: 'decodeOmx4dFile'
+  file: File
 }
 
 interface DecodePtRequest {
@@ -23,7 +30,7 @@ interface CancelRequest {
   kind: 'cancel'
 }
 
-type WorkerRequest = DecodeOmx4dRequest | DecodePtRequest | CancelRequest
+type WorkerRequest = DecodeOmx4dRequest | DecodeOmx4dFileRequest | DecodePtRequest | CancelRequest
 
 interface DecodeSuccess {
   id: number
@@ -70,15 +77,69 @@ function omx4dDataset(buffer: ArrayBuffer): ViewerDataset {
   }
 }
 
-async function handleRequest(request: DecodeOmx4dRequest | DecodePtRequest): Promise<void> {
+async function readFileBuffer(file: File, id: number): Promise<ArrayBuffer> {
+  const bytes = new Uint8Array(file.size)
+  const reader = file.stream().getReader()
+  let offset = 0
+
+  try {
+    while (true) {
+      if (cancelled.has(id)) {
+        await reader.cancel()
+        throw new DOMException('Decode cancelled.', 'AbortError')
+      }
+      const { done, value } = await reader.read()
+      if (cancelled.has(id)) {
+        await reader.cancel()
+        throw new DOMException('Decode cancelled.', 'AbortError')
+      }
+      if (done) break
+      if (offset + value.byteLength > bytes.byteLength) {
+        throw new Error('The selected .omx4d file changed while it was being read.')
+      }
+      bytes.set(value, offset)
+      offset += value.byteLength
+    }
+  } finally {
+    reader.releaseLock()
+  }
+
+  if (offset !== bytes.byteLength) {
+    throw new Error('The selected .omx4d file ended before its declared size.')
+  }
+  return bytes.buffer
+}
+
+async function handleRequest(
+  request: DecodeOmx4dRequest | DecodeOmx4dFileRequest | DecodePtRequest,
+): Promise<void> {
   const { id } = request
   try {
-    const dataset = request.kind === 'decodeOmx4d'
-      ? omx4dDataset(request.buffer)
-      : await convertOmnixPt(request.file, request.options, {
+    if (cancelled.has(id)) return
+    let dataset: ViewerDataset
+    if (request.kind === 'decodeOmx4d') {
+      if (request.buffer.byteLength > MAX_BROWSER_DATASET_FILE_BYTES) {
+        throw new Error('The selected .omx4d payload exceeds the 2 GiB browser limit.')
+      }
+      dataset = omx4dDataset(request.buffer)
+    } else if (request.kind === 'decodeOmx4dFile') {
+      if (request.file.size > MAX_BROWSER_DATASET_FILE_BYTES) {
+        throw new Error('The selected .omx4d file exceeds the 2 GiB browser limit.')
+      }
+      const buffer = await readFileBuffer(request.file, id)
+      if (cancelled.has(id)) return
+      dataset = omx4dDataset(buffer)
+    } else {
+      let lastProgressPhase: string | undefined
+      dataset = await convertOmnixPt(request.file, request.options, {
         isCancelled: () => cancelled.has(id),
         onProgress: (progress) => {
           if (cancelled.has(id)) return
+          const phaseChanged = progress.phase !== lastProgressPhase
+          const intervalReached = progress.completed % 8 === 0
+          const phaseComplete = progress.completed === progress.total
+          if (!phaseChanged && !intervalReached && !phaseComplete) return
+          lastProgressPhase = progress.phase
           const messages: Record<PtDecodeProgress['stage'], string> = {
             archive: 'Reading the PyTorch archive directory',
             metadata: 'Validating tensor metadata',
@@ -95,6 +156,7 @@ async function handleRequest(request: DecodeOmx4dRequest | DecodePtRequest): Pro
           self.postMessage(response)
         },
       })
+    }
     if (cancelled.has(id)) return
     const response: DecodeSuccess = { id, kind: 'success', dataset }
     self.postMessage(response, { transfer: transferablesFor(dataset) })
@@ -112,6 +174,8 @@ async function handleRequest(request: DecodeOmx4dRequest | DecodePtRequest): Pro
   }
 }
 
+let decodeQueue = Promise.resolve()
+
 self.onmessage = (event: MessageEvent<WorkerRequest>) => {
   const request = event.data
   if (request.kind === 'cancel') {
@@ -119,7 +183,7 @@ self.onmessage = (event: MessageEvent<WorkerRequest>) => {
     return
   }
   active.add(request.id)
-  void handleRequest(request)
+  decodeQueue = decodeQueue.then(() => handleRequest(request))
 }
 
 export {}

@@ -5,6 +5,9 @@ import { PtParseError, type PtParseErrorCode } from './types'
 const DEER_PICKLE_BASE64 =
   'gAJ9cQAoWAoAAAB0cmFqZWN0b3J5cQFjdG9yY2guX3V0aWxzCl9yZWJ1aWxkX3RlbnNvcl92MgpxAigoWAcAAABzdG9yYWdlcQNjdG9yY2gKRmxvYXRTdG9yYWdlCnEEWAEAAAAwcQVYAwAAAGNwdXEGSgDAdQZ0cQdRSwAoSxBLEE0YAU34AUsDdHEIKEoAXGcASsB1BgBN6AVLA0sBdHEJiWNjb2xsZWN0aW9ucwpPcmRlcmVkRGljdApxCilScQt0cQxScQ1YCwAAAGNhbWVyYV9wb3NlcQ5oAigoaANoBFgBAAAAMXEPaAZLwHRxEFFLAEsQSwNLBIdxEUsMSwRLAYdxEoloCilScRN0cRRScRVYCgAAAGludHJpbnNpY3NxFmgCKChoA2gEWAEAAAAycRdoBkuQdHEYUUsASxBLA0sDh3EZSwlLA0sBh3EaiWgKKVJxG3RxHFJxHVgTAAAAcHRzM2RfZHluYW1pY19zY29yZXEeaAIoKGgDaARYAQAAADNxH2gGSgB0IgB0cSBRSwBLEE0YAU34AYdxIUpAJwIATfgBSwGHcSKJaAopUnEjdHEkUnEldS4='
 
+const FULL_32_VIEW_PICKLE_BASE64 =
+  'gAJ9cQAoWAoAAAB0cmFqZWN0b3J5cQFjdG9yY2guX3V0aWxzCl9yZWJ1aWxkX3RlbnNvcl92MgpxAigoWAcAAABzdG9yYWdlcQNjdG9yY2gKRmxvYXRTdG9yYWdlCnEEWAEAAAAwcQVYAwAAAGNwdXEGSgAA1xl0cQdRSwAoSyBLIE0YAU34AUsDdHEIKEoAuM4ASsB1BgBN6AVLA0sBdHEJiWNjb2xsZWN0aW9ucwpPcmRlcmVkRGljdApxCilScQt0cQxScQ1YCwAAAGNhbWVyYV9wb3NlcQ5oAigoaANoBFgBAAAAMXEPaAZNgAF0cRBRSwBLIEsDSwSHcRFLDEsESwGHcRKJaAopUnETdHEUUnEVWAoAAABpbnRyaW5zaWNzcRZoAigoaANoBFgBAAAAMnEXaAZNIAF0cRhRSwBLIEsDSwOHcRlLCUsDSwGHcRqJaAopUnEbdHEcUnEdWBMAAABwdHMzZF9keW5hbWljX3Njb3JlcR5oAigoaANoBFgBAAAAM3EfaAZKAOhEAHRxIFFLAEsgTRgBTfgBh3EhSkAnAgBN+AFLAYdxIoloCilScSN0cSRScSV1Lg=='
+
 function goldenPickle(): Uint8Array {
   return Uint8Array.from(atob(DEER_PICKLE_BASE64), (character) => character.charCodeAt(0))
 }
@@ -62,6 +65,27 @@ describe('parseTorchPickle', () => {
       storage: { key: '3', elementCount: 2_257_920, byteLength: 9_031_680 },
       shape: [16, 280, 504],
       stride: [141_120, 504, 1],
+    })
+  })
+
+  it('accepts metadata from the full 32-view, 32-frame inference output', () => {
+    const bytes = Uint8Array.from(
+      atob(FULL_32_VIEW_PICKLE_BASE64),
+      (character) => character.charCodeAt(0),
+    )
+    const tensors = parseTorchPickle(bytes)
+
+    expect(tensors.get('trajectory')).toMatchObject({
+      storage: {
+        elementCount: 433_520_640,
+        byteLength: 1_734_082_560,
+      },
+      shape: [32, 32, 280, 504, 3],
+      stride: [13_547_520, 423_360, 1_512, 3, 1],
+    })
+    expect(tensors.get('pts3d_dynamic_score')).toMatchObject({
+      storage: { elementCount: 4_515_840, byteLength: 18_063_360 },
+      shape: [32, 280, 504],
     })
   })
 

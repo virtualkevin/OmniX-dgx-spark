@@ -96,6 +96,16 @@ function fakeArchive(data: ReadonlyMap<string, Uint8Array>): TorchZipArchive {
 }
 
 describe('convertOmnixPt', () => {
+  it('rejects point budgets above the realtime browser ceiling before reading', async () => {
+    await expect(convertOmnixPt(
+      new Blob(),
+      { pointBudget: 500_001, fps: 15, name: 'too-large.pt' },
+    )).rejects.toMatchObject({
+      code: 'INVALID_OPTIONS',
+      message: 'Point budget must not exceed the browser maximum of 500,000.',
+    })
+  })
+
   beforeEach(() => vi.clearAllMocks())
 
   it('streams tensor members into a renderer dataset without materializing the file', async () => {

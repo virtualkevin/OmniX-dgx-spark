@@ -1,4 +1,5 @@
 import type { ViewerDataset } from '../dataset'
+import { MAX_BROWSER_POINT_BUDGET } from '../limits'
 import type {
   Omx4dAttributeDescriptor,
   Omx4dAttributeManifest,
@@ -107,6 +108,9 @@ function emit(
 function validateOptions(options: PtConversionOptions): PtConversionOptions {
   if (!Number.isSafeInteger(options.pointBudget) || options.pointBudget <= 0) {
     fail('INVALID_OPTIONS', 'Point budget must be a positive safe integer.')
+  }
+  if (options.pointBudget > MAX_BROWSER_POINT_BUDGET) {
+    fail('INVALID_OPTIONS', 'Point budget must not exceed the browser maximum of 500,000.')
   }
   if (!Number.isFinite(options.fps) || options.fps < 0.1 || options.fps > 240) {
     fail('INVALID_OPTIONS', 'Playback FPS must be between 0.1 and 240.')

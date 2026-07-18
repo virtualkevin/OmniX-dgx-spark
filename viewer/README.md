@@ -1,15 +1,26 @@
 # OmniX 4D viewer
 
-This directory contains a static React Three Fiber application that opens the
-OmniX `predictions.pt` output directly in the browser. Raw tensor storage is
-read and sampled in a Web Worker; the selected file is never uploaded and no
-Python runtime or application server is involved. A compact `.omx4d` deer
-sample remains bundled so the first screen is useful before a file is selected.
+This directory contains a static React Three Fiber application that opens raw
+OmniX `predictions.pt` output and baked `.omx4d` renderer payloads directly in
+the browser. PT tensor storage is read and sampled in a Web Worker; OMX4D is
+validated and decoded in that worker without resampling. Selected files are
+never uploaded, and no Python runtime or application server is involved. A
+compact `.omx4d` deer sample remains bundled so the first screen is useful
+before a file is selected.
 
 The only network requests made by the application are ordinary same-origin
 requests for its JavaScript, CSS, worker bundle, and baked sample. Selecting a
-`.pt`, audio file, or video file creates browser-local data and does not issue a
-request containing that file.
+`.pt`, `.omx4d`, audio file, or video file creates browser-local data and does
+not issue a request containing that file.
+
+## Supported `.omx4d` contract
+
+The viewer accepts OMX4D format/schema version 1 point payloads. The worker
+validates the manifest, frame timing, bounds, six typed attribute descriptors,
+section alignment and overlap, finite float data, dynamic-score range, and
+source-view indices before transferring zero-copy typed arrays to the renderer.
+The baked file keeps its own point count, FPS, RGB values, and warnings; the PT
+import-quality selector does not resample an OMX4D file.
 
 ## Supported `.pt` contract
 
@@ -44,11 +55,12 @@ pnpm install --frozen-lockfile
 pnpm dev
 ```
 
-Open [http://127.0.0.1:4173](http://127.0.0.1:4173), then use **Open .pt** or
-drop a supported `predictions.pt` onto the viewer. The worker reports local
-read/validation/sampling progress and transfers only renderer-ready arrays back
-to the UI thread. The optional media picker uses a local audio or video file as
-the playback clock and keeps its existing audio synchronized with the 3D data.
+Open [http://127.0.0.1:4173](http://127.0.0.1:4173), then use
+**Open .pt / .omx4d** or drop either supported format onto the viewer. The worker
+reports PT read/validation/sampling progress and transfers only renderer-ready
+arrays back to the UI thread. OMX4D validation is also off-main-thread. The
+optional media picker uses a local audio or video file as the playback clock and
+keeps its existing audio synchronized with the 3D data.
 
 The production build is also a set of static files:
 
@@ -87,8 +99,9 @@ docker build --file viewer/Dockerfile --target development --tag omnix-viewer-de
 docker run --rm --publish 127.0.0.1:4173:4173 omnix-viewer-dev
 ```
 
-Both container routes support local `.pt` selection because conversion happens
-inside the visiting browser rather than inside the container.
+Both container routes support local `.pt` and `.omx4d` selection because
+conversion/decoding happens inside the visiting browser rather than inside the
+container.
 
 ## Verify changes
 
@@ -110,18 +123,37 @@ pnpm test:e2e
 ```
 
 The unit suite includes synthetic ZIP, pickle, schema, sampling, and streaming
-converter fixtures; the browser suite covers malformed-input recovery. The
-release gate additionally opens the actual OmniX archive through the complete
-worker path. The path must be absolute; without it, the expensive test is
-skipped:
+converter fixtures; the browser suite covers local OMX4D selection and
+malformed-input recovery. The release gates additionally open an actual OmniX
+archive and a baked 500k OMX4D through the complete worker and renderer paths.
+Paths must be absolute; without them, the corresponding expensive tests are
+skipped. For a full-resolution performance gate, serve the production build in
+one terminal:
 
 ```bash
-OMNIX_REAL_PT=/absolute/path/to/predictions.pt pnpm test:e2e
+pnpm build
+pnpm exec vite preview --host 127.0.0.1 --port 4173
 ```
 
-That test selects the file through Chromium, verifies that no `/api` or upload
-request occurs, waits for the renderer-ready dataset, and exercises WebGL
-playback. Validate the static container definition separately with:
+Then run the files through hardware Chromium from a second terminal:
+
+```bash
+OMNIX_REAL_PT=/absolute/path/to/predictions.pt \
+OMNIX_REAL_OMX4D=/absolute/path/to/chunk.omx4d \
+OMNIX_E2E_HARDWARE=1 \
+pnpm test:e2e
+```
+
+Hardware mode uses full headed Chromium, requires a working X11 display, and
+fails if WebGL falls back to SwiftShader. Full-file gates automatically use one
+worker. Without hardware mode, the suite uses portable SwiftShader for ordinary
+CI coverage.
+
+The release gates select each file through Chromium, verify that no
+API/upload/server request occurs, wait for a 500k renderer-ready dataset,
+compare two rendered frames, confirm the WebGL context survives a full loop,
+visit all 32 frames, and enforce realtime 8 FPS cadence. Validate the static
+container definition separately with:
 
 ```bash
 docker compose --file viewer/compose.yaml config --quiet
@@ -129,10 +161,15 @@ docker compose --file viewer/compose.yaml config --quiet
 
 ## Performance and limits
 
-- The default 100k selection produces about 20 MiB of positions for the
-  16-frame deer sequence; 50k and 200k quality options trade detail for memory.
+- PT imports accept files and validated tensor storage up to 2 GiB. The current
+  32-view, 32-frame inference artifacts are about 1.75 GB.
+- PT quality options are 50k, 100k, 200k, and 500k. A 32-frame 500k result uses
+  about 187 MiB for its dataset, plus the current-frame and GPU buffers.
 - The worker uses `File.slice()` and bounded tensor chunks. It does not first
-  copy a 400+ MiB archive into one JavaScript `ArrayBuffer`.
+  copy a 1.75 GB PT archive into one JavaScript `ArrayBuffer`.
+- OMX4D is already renderer-ready and is streamed into a worker-owned
+  `ArrayBuffer`; cancellation is checked between chunks and its baked point
+  count is preserved. A 500k file is about 187.4 MiB.
 - Every trajectory value still has to be read and validated locally. Large
   files therefore take time proportional to their tensor storage even when the
   rendered point budget is small.
@@ -146,19 +183,19 @@ docker compose --file viewer/compose.yaml config --quiet
 
 ## Security and privacy
 
-- Treat every selected `.pt` as untrusted data. Extension and MIME type are
-  hints only; archive structure, entry names, metadata grammar, tensor shapes,
-  storage lengths, finite values, camera matrices, and configured resource
-  ceilings are checked before rendering.
+- Treat every selected `.pt` or `.omx4d` as untrusted data. Extension and MIME
+  type are hints only; archive/payload structure, metadata, shapes, storage and
+  section lengths, finite values, calibration, and configured resource ceilings
+  are checked before rendering.
 - Pickle globals and reductions are parsed only as tokens in the allowlisted
   tensor descriptor grammar. They are never imported, invoked, or evaluated.
 - Browser-only parsing removes the network upload and native PyTorch loading
   surfaces, but it cannot prevent a deliberately expensive local file from
   consuming CPU or tab memory. The worker enforces limits and supports
   cancellation; browser process isolation remains an additional boundary.
-- Selected `.pt`, audio, and video files remain on the user's device. There are
-  no credentials, temporary server files, analytics, persistence, or outbound
-  conversion requests.
+- Selected `.pt`, `.omx4d`, audio, and video files remain on the user's device.
+  There are no credentials, temporary server files, analytics, persistence, or
+  outbound conversion requests.
 - Host the static build with the supplied security headers or equivalent. The
   provided container binds only to `127.0.0.1`; review authentication and origin
   policy before exposing any deployment publicly.

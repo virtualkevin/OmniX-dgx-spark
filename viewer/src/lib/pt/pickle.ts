@@ -4,6 +4,7 @@ import {
   type StorageReference,
   type TensorDescriptor,
 } from './types'
+import { MAX_BROWSER_TENSOR_BYTES } from '../limits'
 
 export { PtParseError } from './types'
 export type { StorageReference, TensorDescriptor } from './types'
@@ -13,8 +14,8 @@ const MAX_OPCODE_COUNT = 10_000
 const MAX_STACK_DEPTH = 256
 const MAX_MEMO_ENTRIES = 512
 const MAX_STRING_BYTES = 256
-const MAX_STORAGE_ELEMENTS = (1024 * 1024 * 1024) / Float32Array.BYTES_PER_ELEMENT
-const MAX_TOTAL_TENSOR_BYTES = 1024 * 1024 * 1024
+const MAX_STORAGE_ELEMENTS = MAX_BROWSER_TENSOR_BYTES / Float32Array.BYTES_PER_ELEMENT
+const MAX_TOTAL_TENSOR_BYTES = MAX_BROWSER_TENSOR_BYTES
 const MAX_SOURCE_VIEWS = 64
 const MAX_FRAMES = 600
 const MAX_SOURCE_PIXELS = 16_000_000

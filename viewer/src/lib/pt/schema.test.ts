@@ -52,6 +52,26 @@ describe('validateOmnixTensorMap', () => {
     })
   })
 
+  it('accepts the repository full-resolution 32-view, 32-frame tensor sizes', () => {
+    const tensors = new Map([
+      ['trajectory', descriptor([32, 32, 280, 504, 3], '0')],
+      ['camera_pose', descriptor([32, 3, 4], '1')],
+      ['intrinsics', descriptor([32, 3, 3], '2')],
+      ['pts3d_dynamic_score', descriptor([32, 280, 504], '3')],
+    ])
+
+    const schema = validateOmnixTensorMap(tensors)
+
+    expect(schema).toMatchObject({
+      sourceViewCount: 32,
+      frameCount: 32,
+      height: 280,
+      width: 504,
+      identityCount: 4_515_840,
+      totalTensorBytes: 1_752_148_608,
+    })
+  })
+
   it('rejects extra keys, shared storage, and non-contiguous strides', () => {
     const extra = validMap()
     extra.set('extra', descriptor([1], '4'))

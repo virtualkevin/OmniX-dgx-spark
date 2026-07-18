@@ -46,6 +46,10 @@ export interface PtDecodeCallbacks {
   onProgress?: (progress: PtDecodeProgress) => void
 }
 
+export interface DatasetDecodeCallbacks {
+  signal?: AbortSignal
+}
+
 export class DecoderClient {
   private readonly worker = new Worker(new URL('../workers/decoder.worker.ts', import.meta.url), { type: 'module' })
   private readonly pending = new Map<number, PendingDecode>()
@@ -75,11 +79,61 @@ export class DecoderClient {
     }
   }
 
-  decode(buffer: ArrayBuffer): Promise<ViewerDataset> {
+  decode(
+    buffer: ArrayBuffer,
+    callbacks: DatasetDecodeCallbacks = {},
+  ): Promise<ViewerDataset> {
     const id = this.nextId++
     return new Promise((resolve, reject) => {
-      this.pending.set(id, { resolve, reject })
+      if (callbacks.signal?.aborted) {
+        reject(new DOMException('Decode cancelled.', 'AbortError'))
+        return
+      }
+
+      const onAbort = () => {
+        const request = this.pending.get(id)
+        if (!request) return
+        this.pending.delete(id)
+        request.cleanup?.()
+        this.worker.postMessage({ id, kind: 'cancel' })
+        reject(new DOMException('Decode cancelled.', 'AbortError'))
+      }
+      callbacks.signal?.addEventListener('abort', onAbort, { once: true })
+      this.pending.set(id, {
+        resolve,
+        reject,
+        cleanup: () => callbacks.signal?.removeEventListener('abort', onAbort),
+      })
       this.worker.postMessage({ id, kind: 'decodeOmx4d', buffer }, [buffer])
+    })
+  }
+
+  decodeOmx4dFile(
+    file: File,
+    callbacks: DatasetDecodeCallbacks = {},
+  ): Promise<ViewerDataset> {
+    const id = this.nextId++
+    return new Promise((resolve, reject) => {
+      if (callbacks.signal?.aborted) {
+        reject(new DOMException('Decode cancelled.', 'AbortError'))
+        return
+      }
+
+      const onAbort = () => {
+        const request = this.pending.get(id)
+        if (!request) return
+        this.pending.delete(id)
+        request.cleanup?.()
+        this.worker.postMessage({ id, kind: 'cancel' })
+        reject(new DOMException('Decode cancelled.', 'AbortError'))
+      }
+      callbacks.signal?.addEventListener('abort', onAbort, { once: true })
+      this.pending.set(id, {
+        resolve,
+        reject,
+        cleanup: () => callbacks.signal?.removeEventListener('abort', onAbort),
+      })
+      this.worker.postMessage({ id, kind: 'decodeOmx4dFile', file })
     })
   }
 
