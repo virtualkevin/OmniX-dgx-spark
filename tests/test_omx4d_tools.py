@@ -43,6 +43,9 @@ class Omx4dToolsTest(unittest.TestCase):
             .reshape(sources, height, width)
             .div(sources * height * width - 1)
         )
+        # The model can exceed one by a float32 ULP; serialization must clamp
+        # this while preserving the raw score for ranking.
+        dynamic_score[2, 1, 4] = 1.0 + torch.finfo(torch.float32).eps
         source_rgb = torch.zeros((sources, height, width, 3), dtype=torch.uint8)
         source_rgb[..., 0] = torch.arange(sources, dtype=torch.uint8)[:, None, None]
         source_rgb[..., 1] = torch.arange(width, dtype=torch.uint8)[None, None, :]
@@ -119,7 +122,7 @@ class Omx4dToolsTest(unittest.TestCase):
             # identities are 22..29; both spatial points come from 0..21.
             cutoff = np.float32(22 / 39)
             self.assertEqual(int(np.count_nonzero(scores >= cutoff)), 8)
-            self.assertAlmostEqual(float(scores.max()), 29 / 39, places=6)
+            self.assertEqual(float(scores.max()), 1.0)
 
             source_descriptor = attributes["sourceView"]
             source_views = np.memmap(

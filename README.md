@@ -192,7 +192,8 @@ The three-video high-resolution production setting is:
 }
 ```
 
-At 24 fps this covers all three sources with 534 non-overlapping shards:
+At 24 fps the production run completed all three sources with 534
+non-overlapping shards:
 
 | Video | Sampled frames | PT/OMX4D shards | Final shard |
 | --- | ---: | ---: | --- |
@@ -201,12 +202,18 @@ At 24 fps this covers all three sources with 534 non-overlapping shards:
 | LOVE ATTACK 180 | 6,358 | 199 | 22 valid + 10 padded |
 | **Total** | **17,040** | **534** | |
 
-Each raw PT is approximately 3.173 GiB. Budget about 1.655 TiB for PTs and
-97.7 GiB for the 500k-point OMX4Ds, plus sampled frames and working headroom.
-The LOVE ATTACK `chunk_0057` pilot completed inference in 55.37 seconds and
-produced a 3,406,956,889-byte PT with exact trajectory shape
+The accepted raw batch completed all 534 shards and passed fresh SHA-256
+recomputation, exact tensor shape and dtype checks, finite-value scans,
+camera-geometry checks, fingerprint validation, and contiguous non-overlap
+validation. It wrote 1,819,314,920,780 bytes (1.655 TiB) of PT data. Recorded
+shard inference totaled 19,201.22 seconds (5 hours 20 minutes), averaged 35.96
+seconds per shard, and peaked at 52.99 GiB of allocated CUDA memory.
+
+Before the full run, the LOVE ATTACK `chunk_0057` pilot completed inference in
+55.37 seconds and produced a 3,406,956,889-byte PT with exact trajectory shape
 `[32, 32, 392, 700, 3]`. All values and geometry checks passed. Its inspected
-24 fps point-cloud render retained the five dancers, background, and motion.
+24 fps point-cloud render retained the five dancers, background, and temporal
+motion.
 
 After the raw batch passes `run_spark_batch_verify.sh --rehash`, bake one
 OMX4D v1 file per PT:
@@ -231,6 +238,9 @@ across all 32 target frames:
 - exactly 100,000 additional, non-duplicate identities are distributed through
   normalized frame-zero 3D voxels to retain scene coverage;
 - padded source views in final shards are excluded from the candidate set;
+- identities are ranked using the raw model scores; after selection, serialized
+  float32 `dynamicScore` values are clamped to `[0, 1]` to absorb occasional
+  few-ULP probability overshoots without changing point selection or ordering;
 - source RGB, dynamic score, source-view index, camera poses, and intrinsics are
   stored alongside `float32 [32, 500000, 3]` positions.
 
@@ -239,6 +249,28 @@ The pilot OMX4D was 196,504,872 bytes. Its binary manifest reported the exact
 stored scores exactly matched the raw PT's global top 400,000, with cutoff
 `0.966971457`. All 32 source views contributed, all positions were finite,
 and recomputed bounds matched the manifest exactly.
+
+The full bake produced 534 OMX4D files totaling 104,933,603,408 bytes (97.727
+GiB): 191 for TT, 144 for Heart Shaker, and 199 for LOVE ATTACK. Exhaustive
+validation rehashed all 534 files and checked the binary schema and descriptors,
+the exact 500,000-point 400k/100k split, finite positions and calibration,
+dynamic-score range, recomputed bounds, provenance, sidecars, and padded-source
+exclusion before publishing the catalog. The production artifacts are organized
+as follows:
+
+```text
+Batch plan/report:
+outputs/youtube_omnix/full_24fps_32f_700x392/{batch_plan.json,batch_report.json}
+
+Raw PT shards:
+outputs/youtube_omnix/full_24fps_32f_700x392/output/<video>/chunk_*/
+
+OMX4D files and sidecars:
+outputs/youtube_omnix/full_24fps_32f_700x392/omx4d_500k_80d20s/<video>/chunk_*.{omx4d,json}
+
+Validation report/catalog:
+outputs/youtube_omnix/full_24fps_32f_700x392/omx4d_500k_80d20s/{validation_report.json,catalog.json}
+```
 
 The exhaustive verifier rehashes every OMX4D, scans every position and
 calibration array, checks padding exclusion and provenance, and publishes

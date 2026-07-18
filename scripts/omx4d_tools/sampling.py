@@ -242,7 +242,10 @@ def sample_predictions(
     # Preserve handedness while converting OpenCV +y-down/+z-forward world
     # coordinates to Three.js' +y-up/-z-forward basis.
     positions[..., 1:].mul_(-1)
-    selected_score = flat_score[identities].contiguous()
+    # OmniX probabilities can overshoot [0, 1] by a few float32 ULPs. Keep
+    # the raw values above for ranking, then enforce the serialized OMX4D
+    # attribute contract at the output boundary.
+    selected_score = flat_score[identities].clamp(0.0, 1.0).contiguous()
 
     if source_rgb is not None:
         expected_rgb_shape = (
