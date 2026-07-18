@@ -461,8 +461,8 @@ def main() -> None:
     batch_root = repo_path(batch["output_root"])
     sampling = batch.get("sampling", {})
     frame_count = sampling.get("frames_per_chunk")
-    model_width = sampling.get("model_width")
-    model_height = sampling.get("model_height")
+    model_width = sampling.get("model_width", 504)
+    model_height = sampling.get("model_height", 280)
     fps = sampling.get("fps")
     if (
         not isinstance(frame_count, int)
@@ -473,12 +473,16 @@ def main() -> None:
     if (
         not isinstance(model_width, int)
         or isinstance(model_width, bool)
-        or model_width != 504
+        or model_width <= 0
+        or model_width % 14 != 0
         or not isinstance(model_height, int)
         or isinstance(model_height, bool)
-        or model_height != 280
+        or model_height <= 0
+        or model_height % 14 != 0
     ):
-        raise ValueError("OmniX web packing requires model dimensions 504x280")
+        raise ValueError(
+            "Batch model dimensions must be positive integers divisible by 14"
+        )
     if (
         not isinstance(fps, (int, float))
         or isinstance(fps, bool)
@@ -617,7 +621,7 @@ def main() -> None:
             "boundary_behavior": "reset-or-crossfade",
         },
         "preprocessing": {
-            "model_resolution": [504, 280],
+            "model_resolution": [model_width, model_height],
             "image_policy": "aspect-preserving resize then center crop",
             "source_crop_filter_per_video": True,
         },

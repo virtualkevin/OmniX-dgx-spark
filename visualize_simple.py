@@ -500,6 +500,7 @@ def run(cfg: DictConfig):
     skip_render = cfg.paths.get("skip_render", False)
     render_scale = int(cfg.paths.get("render_scale", 4))
     orbit_frames = int(cfg.paths.get("orbit_frames", 30))
+    render_fps = float(cfg.paths.get("render_fps", 15))
     save_raw_predictions = cfg.paths.get("save_raw_predictions", True)
     os.makedirs(output_path, exist_ok=True)
 
@@ -565,7 +566,7 @@ def run(cfg: DictConfig):
             traj_width=3,
             img_h=img_h * render_scale,
             img_w=img_w * render_scale,
-            fps=15,
+            fps=render_fps,
             show_dense_point_cloud=True,
             project_all_views=False,
             point_size=max(1, round(1.5 * render_scale)),

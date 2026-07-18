@@ -87,12 +87,31 @@ def inference_fingerprint(
     return hashlib.sha256(encoded).hexdigest()
 
 
-def expected_raw_shapes(frame_count: int) -> dict[str, list[int]]:
+def model_resolution(sampling: Mapping[str, Any]) -> tuple[int, int]:
+    width = sampling.get("model_width", 504)
+    height = sampling.get("model_height", 280)
+    if any(
+        not isinstance(value, int)
+        or isinstance(value, bool)
+        or value <= 0
+        or value % 14 != 0
+        for value in (width, height)
+    ):
+        raise ValueError(
+            "Manifest model_width and model_height must be positive integers "
+            "divisible by 14"
+        )
+    return width, height
+
+
+def expected_raw_shapes(
+    frame_count: int, height: int, width: int
+) -> dict[str, list[int]]:
     return {
-        "trajectory": [frame_count, frame_count, 280, 504, 3],
+        "trajectory": [frame_count, frame_count, height, width, 3],
         "camera_pose": [frame_count, 3, 4],
         "intrinsics": [frame_count, 3, 3],
-        "pts3d_dynamic_score": [frame_count, 280, 504],
+        "pts3d_dynamic_score": [frame_count, height, width],
     }
 
 
@@ -180,12 +199,14 @@ def validate_manifest_sources(repo_root: Path, manifest: dict[str, Any]) -> None
         print(f"Verified source video {video['id']}: {actual_digest}", flush=True)
 
 
-def summary_is_valid(summary: dict[str, Any], frame_count: int) -> bool:
+def summary_is_valid(
+    summary: dict[str, Any], frame_count: int, height: int, width: int
+) -> bool:
     expected = {
-        "trajectory": [1, frame_count, frame_count, 280, 504, 3],
+        "trajectory": [1, frame_count, frame_count, height, width, 3],
         "camera_pose": [1, frame_count, 3, 4],
         "intrinsics": [1, frame_count, 3, 3],
-        "pts3d_dynamic_score": [1, frame_count, 280, 504],
+        "pts3d_dynamic_score": [1, frame_count, height, width],
     }
     return summary.get("input_images") == frame_count and all(
         summary.get(key, {}).get("shape") == shape
@@ -200,6 +221,8 @@ def recover_or_skip(
     video: dict[str, Any],
     chunk: dict[str, Any],
     frame_count: int,
+    height: int,
+    width: int,
 ) -> bool:
     output_dir = resolve_repo_path(repo_root, chunk["output_dir"])
     final_pt = resolve_repo_path(repo_root, chunk["prediction_file"])
@@ -271,7 +294,7 @@ def recover_or_skip(
     if not isinstance(summary, dict):
         print(f"RECOVERY REJECT {label}: summary root is not an object", flush=True)
         return False
-    if not summary_is_valid(summary, frame_count):
+    if not summary_is_valid(summary, frame_count, height, width):
         print(f"RECOVERY REJECT {label}: prediction summary is invalid", flush=True)
         return False
     batch_chunk_summary = summary.get("batch_chunk")
@@ -292,7 +315,7 @@ def recover_or_skip(
             flush=True,
         )
         return False
-    raw_shapes = expected_raw_shapes(frame_count)
+    raw_shapes = expected_raw_shapes(frame_count, height, width)
     if not isinstance(raw, Mapping):
         print(f"RECOVERY REJECT {label}: raw PT root is not a mapping", flush=True)
         return False
@@ -345,7 +368,9 @@ def run(cfg: DictConfig) -> None:
     actual_image_id = os.environ.get("OMNIX_IMAGE_ID")
     if actual_image_id and actual_image_id != provenance["docker_image_id"]:
         raise RuntimeError("Docker image ID differs from the batch manifest")
-    frame_count = int(manifest["sampling"]["frames_per_chunk"])
+    sampling = manifest["sampling"]
+    frame_count = int(sampling["frames_per_chunk"])
+    model_width, model_height = model_resolution(sampling)
     max_chunks = cfg.paths.get("max_chunks", None)
     max_chunks = int(max_chunks) if max_chunks is not None else None
     only_video = cfg.paths.get("only_video", None)
@@ -381,7 +406,15 @@ def run(cfg: DictConfig) -> None:
         video_id = video["id"]
         fingerprint = inference_fingerprint(manifest, video, chunk)
         label = f"{video_id}/{chunk['id']}"
-        if recover_or_skip(repo_root, manifest, video, chunk, frame_count):
+        if recover_or_skip(
+            repo_root,
+            manifest,
+            video,
+            chunk,
+            frame_count,
+            model_height,
+            model_width,
+        ):
             completed += 1
             print(
                 f"[{ordinal}/{len(chunks)}] SKIP {label}: validated output exists",
@@ -413,7 +446,7 @@ def run(cfg: DictConfig) -> None:
         try:
             torch.cuda.reset_peak_memory_stats()
             images, image_info = load_images_from_folder(
-                input_dir, (504, 280), max_images=frame_count
+                input_dir, (model_width, model_height), max_images=frame_count
             )
             if images.shape[0] != frame_count:
                 raise RuntimeError(
@@ -428,7 +461,9 @@ def run(cfg: DictConfig) -> None:
             torch.cuda.synchronize()
 
             summary = summarize_predictions(predictions, REQUIRED_KEYS)
-            summary["geometry_checks"] = validate_geometry(predictions, (280, 504))
+            summary["geometry_checks"] = validate_geometry(
+                predictions, (model_height, model_width)
+            )
             summary["input_images"] = int(images.shape[0])
             summary["batch_chunk"] = {
                 "video_id": video_id,
@@ -437,9 +472,13 @@ def run(cfg: DictConfig) -> None:
                 "pad_frames": chunk["pad_frames"],
                 "start_time_s": chunk["start_time_s"],
                 "end_time_s": chunk["end_time_s"],
+                "model_width": model_width,
+                "model_height": model_height,
                 "inference_fingerprint": fingerprint,
             }
-            if not summary_is_valid(summary, frame_count):
+            if not summary_is_valid(
+                summary, frame_count, model_height, model_width
+            ):
                 raise RuntimeError(f"{label} failed summary shape/finite validation")
             atomic_json(summary_path, summary)
 

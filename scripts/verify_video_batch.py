@@ -78,12 +78,31 @@ def inference_fingerprint(
     return hashlib.sha256(encoded).hexdigest()
 
 
-def expected_raw_shapes(frame_count: int) -> dict[str, list[int]]:
+def model_resolution(sampling: Mapping[str, Any]) -> tuple[int, int]:
+    width = sampling.get("model_width", 504)
+    height = sampling.get("model_height", 280)
+    if any(
+        not isinstance(value, int)
+        or isinstance(value, bool)
+        or value <= 0
+        or value % 14 != 0
+        for value in (width, height)
+    ):
+        raise ValueError(
+            "Manifest model_width and model_height must be positive integers "
+            "divisible by 14"
+        )
+    return width, height
+
+
+def expected_raw_shapes(
+    frame_count: int, height: int, width: int
+) -> dict[str, list[int]]:
     return {
-        "trajectory": [frame_count, frame_count, 280, 504, 3],
+        "trajectory": [frame_count, frame_count, height, width, 3],
         "camera_pose": [frame_count, 3, 4],
         "intrinsics": [frame_count, 3, 3],
-        "pts3d_dynamic_score": [frame_count, 280, 504],
+        "pts3d_dynamic_score": [frame_count, height, width],
     }
 
 
@@ -100,7 +119,9 @@ def tensor_is_finite_chunked(
     )
 
 
-def validate_raw_predictions(pt_path: Path, frame_count: int) -> list[str]:
+def validate_raw_predictions(
+    pt_path: Path, frame_count: int, height: int, width: int
+) -> list[str]:
     errors: list[str] = []
     try:
         raw = torch.load(pt_path, map_location="cpu", mmap=True, weights_only=True)
@@ -110,7 +131,7 @@ def validate_raw_predictions(pt_path: Path, frame_count: int) -> list[str]:
     try:
         if not isinstance(raw, Mapping):
             return ["raw PT root is not a mapping"]
-        for key, shape in expected_raw_shapes(frame_count).items():
+        for key, shape in expected_raw_shapes(frame_count, height, width).items():
             tensor = raw.get(key)
             if not isinstance(tensor, torch.Tensor):
                 errors.append(f"raw {key} tensor is missing")
@@ -310,13 +331,15 @@ def validate_manifest_structure(
     return failures
 
 
-def validate_summary(summary: dict[str, Any], frame_count: int) -> list[str]:
+def validate_summary(
+    summary: dict[str, Any], frame_count: int, height: int, width: int
+) -> list[str]:
     errors: list[str] = []
     expected = {
-        "trajectory": [1, frame_count, frame_count, 280, 504, 3],
+        "trajectory": [1, frame_count, frame_count, height, width, 3],
         "camera_pose": [1, frame_count, 3, 4],
         "intrinsics": [1, frame_count, 3, 3],
-        "pts3d_dynamic_score": [1, frame_count, 280, 504],
+        "pts3d_dynamic_score": [1, frame_count, height, width],
     }
     if summary.get("input_images") != frame_count:
         errors.append(
@@ -368,8 +391,10 @@ def main() -> None:
             f"Unsupported batch manifest schema: {manifest.get('schema')!r}"
         )
     output_root = repo_path(manifest["output_root"])
-    frame_count = int(manifest["sampling"]["frames_per_chunk"])
-    fps = float(manifest["sampling"]["fps"])
+    sampling = manifest["sampling"]
+    frame_count = int(sampling["frames_per_chunk"])
+    fps = float(sampling["fps"])
+    model_width, model_height = model_resolution(sampling)
     if frame_count <= 0 or fps <= 0 or not math.isfinite(fps):
         raise ValueError("Manifest frames_per_chunk and FPS must be positive")
     failures = validate_manifest_structure(manifest, frame_count, fps)
@@ -405,7 +430,11 @@ def main() -> None:
             if not pt_path.is_file():
                 chunk_errors.append("prediction PT is missing")
             else:
-                chunk_errors.extend(validate_raw_predictions(pt_path, frame_count))
+                chunk_errors.extend(
+                    validate_raw_predictions(
+                        pt_path, frame_count, model_height, model_width
+                    )
+                )
             if status_path.is_file():
                 try:
                     status_value = json.loads(status_path.read_text())
@@ -462,7 +491,9 @@ def main() -> None:
                 ):
                     chunk_errors.append("PT SHA-256 does not match status")
             if summary is not None:
-                chunk_errors.extend(validate_summary(summary, frame_count))
+                chunk_errors.extend(
+                    validate_summary(summary, frame_count, model_height, model_width)
+                )
                 batch_chunk = summary.get("batch_chunk")
                 if isinstance(batch_chunk, dict):
                     summary_fingerprint = batch_chunk.get("inference_fingerprint")
@@ -564,6 +595,7 @@ def main() -> None:
         "expected_chunks": manifest["total_chunks"],
         "completed_chunks": completed_total,
         "total_pt_bytes": sum(video["pt_bytes"] for video in video_reports),
+        "model_resolution": [model_width, model_height],
         "videos": video_reports,
         "failures": failures,
     }

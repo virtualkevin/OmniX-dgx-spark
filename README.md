@@ -171,6 +171,81 @@ The manifest and per-chunk `status.json` files make the workflow resumable.
 Use a new `output_root` when intentionally changing sampling or model settings;
 fingerprint checks prevent old results from being silently accepted.
 
+### High-resolution 500k OMX4D workflow
+
+The batch specification also accepts `model_width` and `model_height`. Both
+must be positive multiples of the model's 14-pixel patch size. The creators'
+native setting remains `504x280`; `700x392` is an inference-time
+generalization with nearly the same aspect ratio and a valid `50x28` patch
+grid. Validate one representative shard before committing a multi-terabyte
+run.
+
+The three-video high-resolution production setting is:
+
+```json
+{
+  "sampling_fps": 24,
+  "frames_per_chunk": 32,
+  "model_width": 700,
+  "model_height": 392,
+  "output_root": "outputs/youtube_omnix/full_24fps_32f_700x392"
+}
+```
+
+At 24 fps this covers all three sources with 534 non-overlapping shards:
+
+| Video | Sampled frames | PT/OMX4D shards | Final shard |
+| --- | ---: | ---: | --- |
+| TWICE “TT” | 6,085 | 191 | 5 valid + 27 padded |
+| TWICE “Heart Shaker” | 4,597 | 144 | 21 valid + 11 padded |
+| LOVE ATTACK 180 | 6,358 | 199 | 22 valid + 10 padded |
+| **Total** | **17,040** | **534** | |
+
+Each raw PT is approximately 3.173 GiB. Budget about 1.655 TiB for PTs and
+97.7 GiB for the 500k-point OMX4Ds, plus sampled frames and working headroom.
+The LOVE ATTACK `chunk_0057` pilot completed inference in 55.37 seconds and
+produced a 3,406,956,889-byte PT with exact trajectory shape
+`[32, 32, 392, 700, 3]`. All values and geometry checks passed. Its inspected
+24 fps point-cloud render retained the five dancers, background, and motion.
+
+After the raw batch passes `run_spark_batch_verify.sh --rehash`, bake one
+OMX4D v1 file per PT:
+
+```bash
+./scripts/run_spark_omx4d_bake.sh \
+  outputs/youtube_omnix/full_24fps_32f_700x392/batch_plan.json \
+  --point-budget 500000 \
+  --dynamic-reserved-fraction 0.8
+
+./scripts/run_spark_omx4d_verify.sh \
+  outputs/youtube_omnix/full_24fps_32f_700x392/batch_plan.json \
+  outputs/youtube_omnix/full_24fps_32f_700x392/omx4d_500k_80d20s
+```
+
+The 500k budget is per shard. Selection is deterministic and identity-stable
+across all 32 target frames:
+
+- exactly 400,000 identities are the global highest dynamic scores across the
+  valid source views; the threshold is zero, so selection continues into lower
+  scores until the reserve is full;
+- exactly 100,000 additional, non-duplicate identities are distributed through
+  normalized frame-zero 3D voxels to retain scene coverage;
+- padded source views in final shards are excluded from the candidate set;
+- source RGB, dynamic score, source-view index, camera poses, and intrinsics are
+  stored alongside `float32 [32, 500000, 3]` positions.
+
+The pilot OMX4D was 196,504,872 bytes. Its binary manifest reported the exact
+400k/100k split, and an independent check proved that its highest 400,000
+stored scores exactly matched the raw PT's global top 400,000, with cutoff
+`0.966971457`. All 32 source views contributed, all positions were finite,
+and recomputed bounds matched the manifest exactly.
+
+The exhaustive verifier rehashes every OMX4D, scans every position and
+calibration array, checks padding exclusion and provenance, and publishes
+`catalog.json` only if the complete file set passes. OMX4D chunks retain
+stable point identities within a chunk, not across chunks; a web player should
+stream the catalog in sequence and reset or crossfade at boundaries.
+
 ### Browser timeline package
 
 Raw PTs are deliberately preserved, but a browser should not download a

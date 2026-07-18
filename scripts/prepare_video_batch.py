@@ -278,6 +278,18 @@ def main() -> None:
     chunk_frames = int(spec["frames_per_chunk"])
     if fps <= 0 or chunk_frames <= 0:
         raise ValueError("sampling_fps and frames_per_chunk must be positive")
+    model_width = spec.get("model_width", 504)
+    model_height = spec.get("model_height", 280)
+    if any(
+        not isinstance(value, int)
+        or isinstance(value, bool)
+        or value <= 0
+        or value % 14 != 0
+        for value in (model_width, model_height)
+    ):
+        raise ValueError(
+            "model_width and model_height must be positive integers divisible by 14"
+        )
 
     output_root = repo_path(spec["output_root"])
     output_root.mkdir(parents=True, exist_ok=True)
@@ -327,8 +339,8 @@ def main() -> None:
             "frames_per_chunk": chunk_frames,
             "non_overlapping": True,
             "tail_policy": "repeat-last-frame-padding",
-            "model_width": 504,
-            "model_height": 280,
+            "model_width": model_width,
+            "model_height": model_height,
         },
         "provenance": {
             "git_commit": git_commit,

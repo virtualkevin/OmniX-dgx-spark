@@ -2,6 +2,8 @@
   "schema": "omnix.video-batch-spec.v1",
   "sampling_fps": 8,
   "frames_per_chunk": 32,
+  "model_width": 504,
+  "model_height": 280,
   "output_root": "outputs/video_batch_8fps_32f",
   "docker_image": "omnix-dgx-spark:latest",
   "checkpoint": "pretrained_weight/eccv_release.ckpt",
