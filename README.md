@@ -1,3 +1,34 @@
+# OmniX for NVIDIA DGX Spark
+
+This is the **DGX Spark fork** of [the original OmniX repository](https://github.com/yanqinJiang/OmniX). It keeps the upstream OmniX model and workflow while adding a tested, reproducible inference path for NVIDIA DGX Spark (ARM64/GB10).
+
+## What this fork adds
+
+- DGX Spark container builds with pinned NVIDIA PyTorch, CUDA, and Python dependencies.
+- Checkpoint-compatible PyTorch scaled-dot-product attention in place of the Hopper-only FlashAttention-3 dependency.
+- Deformable DETR CUDA operator builds for the GB10's `sm_120` architecture.
+- Resumable long-video batch inference, validation, and high-resolution output workflows.
+- Deterministic baking and verification of compact `.omx4d` files for browser playback.
+- A browser-based 4D viewer for raw OmniX `.pt` predictions and baked `.omx4d` files.
+
+## OMX4D viewer quickstart
+
+The viewer opens `.omx4d` files directly in your browser; selected files stay local and are not uploaded. A sample file is included so you can try it immediately.
+
+```bash
+docker compose --file viewer/compose.yaml up --build
+```
+
+Open [http://127.0.0.1:4173](http://127.0.0.1:4173), then click **Open .pt / .omx4d** or drag an `.omx4d` file onto the page. Stop the viewer with:
+
+```bash
+docker compose --file viewer/compose.yaml down
+```
+
+For Node.js development, production builds, supported file details, and testing instructions, see the [viewer README](viewer/README.md).
+
+---
+
 # OmniX: Any-view and Any-time 4D Reconstruction via Feed-forward Trajectory Fields
 
 Yanqin Jiang<sup>1</sup>, Tengfei Wang<sup>2✉</sup>, Zhengwei Wang<sup>2</sup>, Chenjie Cao<sup>2</sup>, Junta Wu<sup>2</sup>,  
