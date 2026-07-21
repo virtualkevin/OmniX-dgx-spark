@@ -17,3 +17,9 @@ dependencies/Deformable_DETR/models/ops/build
 dependencies/Deformable_DETR/models/ops/dist
 dependencies/Deformable_DETR/models/ops/*.egg-info
 dependencies/Deformable_DETR/models/ops/**/*.so
+viewer/node_modules
+viewer/dist
+viewer/coverage
+viewer/.vite
+viewer/playwright-report
+viewer/test-results
